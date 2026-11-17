@@ -1,0 +1,21 @@
+# Symbols the TzD kernel refers to that no unit defines (task #42).
+#
+# The kernel leaves these undefined on purpose: GCC removes every reference
+# to them (the code is dead for this configuration).  TzD keeps a few of the
+# references, because its bounds checks, wipes and register clear are side
+# effects that GCC must not drop.  tests/kernel/tzd_sizes.py defines each
+# name below as a stub that stops the kernel (tzd_trap) when it is reached,
+# so a wrong "dead" assumption is a panic, never silent.  Any undefined
+# symbol not listed here still fails the link.
+#
+# name                       where, and why the reference stays
+__retpoline_sites            # arch/x86/kernel/alternative.c: noinline empty apply_retpolines() (RETPOLINE=n) is not const in TzD
+__retpoline_sites_end        # (same)
+__return_sites               # (same): apply_returns() (MITIGATION_RETHUNK=n)
+__return_sites_end           # (same)
+__cfi_sites                  # (same): __apply_fineibt() stub (FINEIBT=n)
+__cfi_sites_end              # (same)
+convert_from_fxsr            # arch/x86/kernel/fpu/signal.c: 32-bit frames only (IA32_EMULATION=n), kept by a value GCC no longer tracks
+of_device_unregister         # drivers/pci/remove.c: dev_of_node() is NULL without CONFIG_OF, kept as for dax_mapping()
+dax_delete_mapping_entry     # mm/truncate.c: dax_mapping() is always false (S_DAX 0) but has checked loads, not inlined
+__scoped_seqlock_bug         # include/linux/seqlock.h: the ss_done case; the tzd_sh_load of ss_tmp.lock lets ss_tmp escape

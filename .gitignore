@@ -1,0 +1,4 @@
+work/
+libc2d/build/
+*.o
+*.a

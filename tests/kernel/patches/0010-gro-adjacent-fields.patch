@@ -1,0 +1,91 @@
+TzD (task #42): read adjacent header fields through the header pointer.
+GRO reads two adjacent 16-bit fields as one 32-bit word through the
+first field's address: *(u32 *)&th->source (source and dest ports),
+*(__be32 *)&iph->id (id and frag_off).  TzD bounds &p->field to that
+field, so the 4-byte read traps (inet_gro_receive).  Take the address
+from the header instead, (u8 *)(p) + offsetof(typeof(*(p)), field): the
+same bytes, bounded by the header.
+--- a/net/ipv4/udp_offload.c	2026-11-13 22:41:12.532065791 +0900
++++ b/net/ipv4/udp_offload.c	2026-11-13 22:41:12.581331369 +0900
+@@ -287,7 +287,7 @@
+ 	uh2 = udp_hdr(seg->next);
+ 	iph2 = ipv6_hdr(seg->next);
+ 
+-	if (!(*(const u32 *)&uh->source ^ *(const u32 *)&uh2->source) &&
++	if (!(*(const u32 *)((u8 *)(uh) + offsetof(typeof(*(uh)), source)) ^ *(const u32 *)((u8 *)(uh2) + offsetof(typeof(*(uh2)), source))) &&
+ 	    ipv6_addr_equal(&iph->saddr, &iph2->saddr) &&
+ 	    ipv6_addr_equal(&iph->daddr, &iph2->daddr))
+ 		return segs;
+@@ -576,7 +576,7 @@
+ 		uh2 = udp_hdr(p);
+ 
+ 		/* Match ports only, as csum is always non zero */
+-		if ((*(u32 *)&uh->source != *(u32 *)&uh2->source)) {
++		if ((*(u32 *)((u8 *)(uh) + offsetof(typeof(*(uh)), source)) != *(u32 *)((u8 *)(uh2) + offsetof(typeof(*(uh2)), source)))) {
+ 			NAPI_GRO_CB(p)->same_flow = 0;
+ 			continue;
+ 		}
+@@ -681,7 +681,7 @@
+ 		/* Match ports and either checksums are either both zero
+ 		 * or nonzero.
+ 		 */
+-		if ((*(u32 *)&uh->source != *(u32 *)&uh2->source) ||
++		if ((*(u32 *)((u8 *)(uh) + offsetof(typeof(*(uh)), source)) != *(u32 *)((u8 *)(uh2) + offsetof(typeof(*(uh2)), source))) ||
+ 		    (!uh->check ^ !uh2->check)) {
+ 			NAPI_GRO_CB(p)->same_flow = 0;
+ 			continue;
+--- a/net/ipv4/af_inet.c	2026-11-13 22:41:12.538477917 +0900
++++ b/net/ipv4/af_inet.c	2026-11-13 22:41:12.581732417 +0900
+@@ -1507,7 +1507,7 @@
+ 		goto out;
+ 
+ 	NAPI_GRO_CB(skb)->proto = proto;
+-	flush = (u16)((ntohl(*(__be32 *)iph) ^ skb_gro_len(skb)) | (ntohl(*(__be32 *)&iph->id) & ~IP_DF));
++	flush = (u16)((ntohl(*(__be32 *)iph) ^ skb_gro_len(skb)) | (ntohl(*(__be32 *)((u8 *)(iph) + offsetof(typeof(*(iph)), id))) & ~IP_DF));
+ 
+ 	list_for_each_entry(p, head, list) {
+ 		struct iphdr *iph2;
+--- a/net/ipv4/tcp_offload.c	2026-11-13 22:41:12.545284388 +0900
++++ b/net/ipv4/tcp_offload.c	2026-11-13 22:41:12.581965741 +0900
+@@ -66,7 +66,7 @@
+ 	th2 = tcp_hdr(seg->next);
+ 	iph2 = ip_hdr(seg->next);
+ 
+-	if (!(*(const u32 *)&th->source ^ *(const u32 *)&th2->source) &&
++	if (!(*(const u32 *)((u8 *)(th) + offsetof(typeof(*(th)), source)) ^ *(const u32 *)((u8 *)(th2) + offsetof(typeof(*(th2)), source))) &&
+ 	    iph->daddr == iph2->daddr && iph->saddr == iph2->saddr)
+ 		return segs;
+ 
+@@ -268,7 +268,7 @@
+ 			continue;
+ 
+ 		th2 = tcp_hdr(p);
+-		if (*(u32 *)&th->source ^ *(u32 *)&th2->source) {
++		if (*(u32 *)((u8 *)(th) + offsetof(typeof(*(th)), source)) ^ *(u32 *)((u8 *)(th2) + offsetof(typeof(*(th2)), source))) {
+ 			NAPI_GRO_CB(p)->same_flow = 0;
+ 			continue;
+ 		}
+--- a/net/ipv6/tcpv6_offload.c	2026-11-13 22:41:12.551409102 +0900
++++ b/net/ipv6/tcpv6_offload.c	2026-11-13 22:41:12.582148449 +0900
+@@ -140,7 +140,7 @@
+ 	th2 = tcp_hdr(seg->next);
+ 	iph2 = ipv6_hdr(seg->next);
+ 
+-	if (!(*(const u32 *)&th->source ^ *(const u32 *)&th2->source) &&
++	if (!(*(const u32 *)((u8 *)(th) + offsetof(typeof(*(th)), source)) ^ *(const u32 *)((u8 *)(th2) + offsetof(typeof(*(th2)), source))) &&
+ 	    ipv6_addr_equal(&iph->saddr, &iph2->saddr) &&
+ 	    ipv6_addr_equal(&iph->daddr, &iph2->daddr))
+ 		return segs;
+--- a/include/net/gro.h	2026-11-13 22:41:12.557908170 +0900
++++ b/include/net/gro.h	2026-11-13 22:41:12.582294216 +0900
+@@ -447,8 +447,8 @@
+ static inline int inet_gro_flush(const struct iphdr *iph, const struct iphdr *iph2,
+ 				 struct sk_buff *p, bool outer)
+ {
+-	const u32 id = ntohl(*(__be32 *)&iph->id);
+-	const u32 id2 = ntohl(*(__be32 *)&iph2->id);
++	const u32 id = ntohl(*(__be32 *)((u8 *)(iph) + offsetof(typeof(*(iph)), id)));
++	const u32 id2 = ntohl(*(__be32 *)((u8 *)(iph2) + offsetof(typeof(*(iph2)), id)));
+ 	const u16 ipid_offset = (id >> 16) - (id2 >> 16);
+ 	const u16 count = NAPI_GRO_CB(p)->count;
+ 	const u32 df = id & IP_DF;

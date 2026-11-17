@@ -1,0 +1,42 @@
+--- a/functions/string.c
++++ b/functions/string.c
+@@ -1446,19 +1446,22 @@
+ 	char *end = haystack + length;
+ 	char *new;
+ 	char *off;
++	int qoff;
+ 	
+ 	new = emalloc(length);
+ 	/* we jump through haystack searching for the needle. hurray! */
+ 	for(p = haystack, q = new;
+ 			(r = _php3_memnstr(p, needle, needle_len, end));) {
+ 	/* this ain't optimal. you could call it `efficient memory usage' */
++		qoff = q - new;
+ 		off = erealloc(new, (q - new) + (r - p) + (str_len) + 1);
+ 		if(off != new) {
+ 			if(!off) {
+ 				goto finish;
+ 			}
+-			q += off - new;
++			/* q points into the old block: recompute it in the new one */
+ 			new = off;
++			q = new + qoff;
+ 		}
+ 		memcpy(q, p, r - p);
+ 		q += r - p;
+@@ -1470,13 +1473,14 @@
+ 	/* if there is a rest, copy it */
+ 	if((end - p) > 0) {
+ 		s = (q) + (end - p);
++		qoff = q - new;
+ 		off = erealloc(new, s - new + 1);
+ 		if(off != new) {
+ 			if(!off) {
+ 				goto finish;
+ 			}
+-			q += off - new;
+ 			new = off;
++			q = new + qoff;
+ 			s = q + (end - p);
+ 		}
+ 		memcpy(q, p, end - p);

@@ -1,0 +1,17 @@
+TzD (task #42): virtnet_rx_mode_work steps over the unicast list in bytes.
+The multicast half of the MAC filter buffer starts at
+&mac_data->macs[uc_count][0], the address of one 6-byte row, and the
+code then writes the count and the multicast rows through it: past
+that row (undefined in C; TzD bounds the row and traps).  Count from
+the start of macs[] in bytes instead: the bounds of the whole buffer.
+--- a/drivers/net/virtio_net.c	2026-11-13 20:47:07.849648844 +0900
++++ b/drivers/net/virtio_net.c	2026-11-13 20:47:07.865592645 +0900
+@@ -3663,7 +3663,7 @@
+ 		   sizeof(mac_data->entries) + (uc_count * ETH_ALEN));
+ 
+ 	/* multicast list and count fill the end */
+-	mac_data = (void *)&mac_data->macs[uc_count][0];
++	mac_data = (void *)((u8 *)mac_data->macs + uc_count * ETH_ALEN);
+ 
+ 	mac_data->entries = cpu_to_virtio32(vi->vdev, mc_count);
+ 	i = 0;

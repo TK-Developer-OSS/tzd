@@ -1,0 +1,22 @@
+TzD (task #42): larger kernel stacks while TzD frames are large.
+TzD's bounds checks and 24-byte pointer records make stack frames
+larger, as KASAN's instrumentation does, and the 16 KiB task stack
+overflowed (kthreadd: copy_process -> __schedule -> rb_erase).  The
+kernel already doubles its stacks for KASAN through KASAN_STACK_ORDER;
+TZD_STACK_ORDER, passed by tests/kernel/build_tzd.sh in KCPPFLAGS (seen
+by C, assembly and the linker script), does the same.  Without it the
+kernel is unchanged.  Interim: smaller frames are the real fix.
+--- a/arch/x86/include/asm/page_64_types.h	2026-11-13 18:25:47.534315269 +0900
++++ b/arch/x86/include/asm/page_64_types.h	2026-11-13 18:25:47.554969554 +0900
+@@ -8,6 +8,11 @@
+ 
+ #ifdef CONFIG_KASAN
+ #define KASAN_STACK_ORDER 1
++#elif defined(TZD_STACK_ORDER)
++/* TzD (task #42): its checks and 24-byte pointer records make frames
++   larger, as KASAN's instrumentation does; tests/kernel/build_tzd.sh
++   passes TZD_STACK_ORDER (C, assembly and the linker script alike).  */
++#define KASAN_STACK_ORDER TZD_STACK_ORDER
+ #else
+ #define KASAN_STACK_ORDER 0
+ #endif

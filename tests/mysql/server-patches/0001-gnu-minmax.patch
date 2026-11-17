@@ -1,0 +1,11 @@
+--- a/include/global.h	2026-11-14 08:43:50.780966282 +0900
++++ b/include/global.h	2026-11-14 08:46:13.720328372 +0900
+@@ -288,7 +288,7 @@
+ #endif
+ 
+ /* Define some useful general macros */
+-#if defined(__cplusplus) && defined(__GNUC__)
++#if 0
+ #define max(a, b)	((a) >? (b))
+ #define min(a, b)	((a) <? (b))
+ #elif !defined(max)

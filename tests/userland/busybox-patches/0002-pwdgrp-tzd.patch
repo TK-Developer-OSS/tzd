@@ -1,0 +1,47 @@
+--- a/libpwdgrp/pwd_grp.c
++++ b/libpwdgrp/pwd_grp.c
+@@ -33,24 +33,23 @@
+ 
+ struct const_passdb {
+ 	const char *filename;
+-	char def[7 + 2*ENABLE_USE_BB_SHADOW];
++	char def[8 + 2*ENABLE_USE_BB_SHADOW]; /* TzD: room for the NUL */
+ 	uint8_t off[7 + 2*ENABLE_USE_BB_SHADOW];
+ 	uint8_t numfields;
+ 	uint8_t size_of;
+ };
+ struct passdb {
+ 	const char *filename;
+-	char def[7 + 2*ENABLE_USE_BB_SHADOW];
++	char def[8 + 2*ENABLE_USE_BB_SHADOW]; /* TzD: room for the NUL */
+ 	uint8_t off[7 + 2*ENABLE_USE_BB_SHADOW];
+ 	uint8_t numfields;
+ 	uint8_t size_of;
+ 	FILE *fp;
+ 	char *malloced;
+ };
+-/* Note: for shadow db, def[] will not contain terminating NUL,
+- * but convert_to_struct() logic detects def[] end by "less than SP?",
+- * not by "is it NUL?" condition; and off[0] happens to be zero
+- * for every db anyway, so there _is_ in fact a terminating NUL there.
++/* Note: def[] has room for the terminating NUL of every db (TzD: reading
++ * the NUL from the next member, off[0], is outside def[]).
++ * convert_to_struct() detects def[] end by "less than SP?".
+  */
+ 
+ /* S = string not empty, s = string maybe empty,
+@@ -297,9 +296,12 @@
+ 			 * in parse_common() which allocates additional space
+ 			 * at the end of malloced buffer!
+ 			 */
++			/* TzD: the same address, reached from tokenize_end by
++			 * pointer arithmetic (a pointer rebuilt from an integer
++			 * has no bounds). */
+ 			members = (char **)
+-				( ((intptr_t)S.tokenize_end + sizeof(members[0]))
+-				& -(intptr_t)sizeof(members[0])
++				( S.tokenize_end + sizeof(members[0])
++				- ((uintptr_t)S.tokenize_end & (sizeof(members[0]) - 1))
+ 				);
+ 			((struct group *)result)->gr_mem = members;
+ 			while (--i >= 0) {

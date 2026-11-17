@@ -1,0 +1,30 @@
+TzD (task #59): kfree / kmem_cache_free destroy the object in two stages
+and drop its bounds entries (__tzd_wipe), the release rule libc2d's
+free() follows (TK 2026-11-07).  Without it a freed object's entries
+stay live and slab pages are reused elsewhere with stale records.
+Caches with a ctor, SLAB_TYPESAFE_BY_RCU and SLAB_POISON are left alone,
+as init_on_free does.  Whether this hook can become a weakness: task #68.
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -2338,6 +2338,21 @@
+ 	if (kasan_slab_pre_free(s, x))
+ 		return false;
+ 
++#ifdef __TZD__
++	/*
++	 * TzD (task #59): every release destroys the memory in two stages
++	 * (zero, then meaningless bytes) and drops its bounds entries, as
++	 * libc2d's free() does.  Before the freepointer is written.  The
++	 * caches init_on_free leaves alone are left alone here too
++	 * (slab_want_init_on_free): a ctor's state must survive a free (the
++	 * ctor runs once per slab, shmem_inode_cache), SLAB_TYPESAFE_BY_RCU
++	 * objects stay readable, SLAB_POISON has its own pattern.  Task #68
++	 * looks at this hook as a whole.
++	 */
++	if (!s->ctor && !(s->flags & (SLAB_TYPESAFE_BY_RCU | SLAB_POISON)))
++		__tzd_wipe(x, s->object_size);
++#endif
++
+ #ifdef CONFIG_SLUB_RCU_DEBUG
+ 	if (still_accessible) {
+ 		struct rcu_delayed_free *delayed_free;

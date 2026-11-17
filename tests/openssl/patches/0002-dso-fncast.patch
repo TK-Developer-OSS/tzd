@@ -1,0 +1,30 @@
+--- a/crypto/provider_core.c	2026-04-07 21:26:30.000000000 +0900
++++ b/crypto/provider_core.c	2026-11-15 17:35:06.432000261 +0900
+@@ -1028,8 +1028,8 @@
+             goto end;
+         }
+ 
+-        prov->init_function = (OSSL_provider_init_fn *)
+-            DSO_bind_func(prov->module, "OSSL_provider_init");
++        prov->init_function = __tzd_fncast(OSSL_provider_init_fn,
++            DSO_bind_func(prov->module, "OSSL_provider_init"));
+ #endif
+     }
+ 
+--- a/crypto/conf/conf_mod.c	2026-04-07 21:26:30.000000000 +0900
++++ b/crypto/conf/conf_mod.c	2026-11-15 17:35:06.432315590 +0900
+@@ -312,12 +312,12 @@
+         errcode = CONF_R_ERROR_LOADING_DSO;
+         goto err;
+     }
+-    ifunc = (conf_init_func *)DSO_bind_func(dso, DSO_mod_init_name);
++    ifunc = __tzd_fncast(conf_init_func, DSO_bind_func(dso, DSO_mod_init_name));
+     if (ifunc == NULL) {
+         errcode = CONF_R_MISSING_INIT_FUNCTION;
+         goto err;
+     }
+-    ffunc = (conf_finish_func *)DSO_bind_func(dso, DSO_mod_finish_name);
++    ffunc = __tzd_fncast(conf_finish_func, DSO_bind_func(dso, DSO_mod_finish_name));
+     /* All OK, add module */
+     md = module_add(dso, name, ifunc, ffunc);
+ 
