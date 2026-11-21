@@ -16,6 +16,14 @@ Since being hard to tell apart is inconvenient, I write it as TzD for short.
 
 ---
 
+## Support TzD
+
+Reaching the current goal takes a very large amount of AI cost. To help release a finished version as soon as possible, please consider a donation. As a thank-you, supporters who ask in their Ko-fi message will be listed by name (or handle) in [Special Thanks](#special-thanks).
+
+[![Support TzD on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/tk110835)
+
+---
+
 TzD is a C-compatible, GCC-based system programming language. It pays its respects to the D language and asks, in that spirit, what a "new D" should be: keep C's syntax and capabilities, and add the safety and abstraction facilities that C never had (Managed C, classes, contracts, delegates).
 
 ## Verification goals
@@ -36,6 +44,27 @@ TzD is a C-compatible, GCC-based system programming language. It pays its respec
 
 As a next step I want to bring in hardware support.  As the first one, Intel MPX (Memory Protection Extensions), now discontinued, can be tried out (`-ftzd-mpx`).  First make everything fail safe, whatever the cost; then see how far it can be made fast, and widen the PoC to the level of CPU logic and IP.
 
+## Design under discussion: who may write
+
+> Status: under discussion, not implemented yet.
+
+TzD's current checks all ask whether a pointer may touch the memory (out of bounds, use after free, uninitialized). Some vulnerabilities write in-bounds, live, initialized memory from code that is not its rightful writer (for example CVE-2026-31431, "Copy Fail"); that is outside those checks. C source does not record who may write a piece of memory, so the compiler cannot guess it. The design adds a layer where a few annotations state it and the compiler enforces it.
+
+- **Syntax**: annotations are comments, `// @tzd key=value ...` (`/* @tzd ... */` before an expression). Other compilers see plain comments. Annotations only add checks; an annotation with nothing to apply to, or an unknown key, is a compile error.
+- **Write groups**: memory belongs automatically to a group named after the function that allocated it; that function is its gate. Code outside it may write only with an explicit `// @tzd set=allow group=<name>`. A pointer whose group cannot be traced is a compile error, like a missing prototype. Helpers such as memcpy are marked `// @tzd delegate` and write with their caller's permission. On free, the memory moves to the allocator's group, so the allocator needs no all-groups privilege. `mode=strict` is the default; `mode=free` explicitly lets anyone write.
+- **Typed void pointers**: the annotation lists the role of each pointer level from the outside in; the count must match the declaration. A `void *` member of a struct needs such an annotation. Storing a typed pointer into a `void *` records a type id that is checked when it is cast back (the mechanism already used for function pointers).
+
+  ```c
+  // @tzd type=array,struct_a
+  void **a;            /* a points to an array; each element points to a struct_a */
+
+  struct s {
+    // @tzd type=ptr,struct_a
+    void *c;           /* a void * member must be annotated */
+  };
+  ```
+- **Open points**: objects of different groups on one slab page, the gap between check and store on SMP, aliases of one physical page, uninstrumented code (assembly, native functions). DMA and read-side leaks are out of scope.
+
 ## Cautions
 
 This is a research environment. Do not treat it as proven safe.
@@ -46,7 +75,8 @@ This is a research environment. Do not treat it as proven safe.
 - **It is slow.** About 20x the GCC build on pointer-heavy code (as of 2026-11-17).
 - **It uses a lot of memory.** The guest starts with 2 GB, and the kernel's bounds table takes 512 MB. Addresses are never reused, so a long run uses up the virtual address space and the table and stops (a reboot fixes it).
 - **Experimental:** `-ftzd-mpx` (checks with Intel MPX instructions) runs only on CPUs with MPX (Skylake to Comet Lake) and is not measured on real hardware. On a CPU without MPX the program stops at start-up.
-- **Not supported:** stack traces of other tasks, and SMP (one CPU only).
+- **SMP:** the kernel builds and boots on one or two CPUs. The kernel's bounds table has no locking for concurrent access from several CPUs yet.
+- **Not supported:** stack traces of other tasks.
 - **Work in progress:** see `STATUS.md` for the design and the state. It changes often.
 
 ## License
@@ -56,6 +86,10 @@ This is a research environment. Do not treat it as proven safe.
 - Everything else (`bin/`, `tests/`, `docs/`, the specification): GPL-3.0-or-later
 
 Other people's software (Linux, bash, coreutils, BusyBox, OpenSSH, OpenSSL) is not part of this repository.  The QEMU image in the releases contains binaries of them built with TzD; see SOURCES.md in the release.
+
+## Special Thanks
+
+Supporters who asked to be listed appear here.
 
 ## Acknowledgments
 
