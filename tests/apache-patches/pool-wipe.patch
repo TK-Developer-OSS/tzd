@@ -1,0 +1,19 @@
+--- a/main/alloc.c
++++ b/main/alloc.c
+@@ -180,6 +180,16 @@
+ #define debug_verify_filled(a,b,c)
+ #endif
+ 
++/* TzD (TK 2026-11-07): memory a pool releases -- blocks returned to the
++   free list, the cleared part of a pool's first block -- is destroyed in
++   two stages (zero, then random; bounds entries removed) at exactly the
++   points the ALLOC_DEBUG build fills it.  __tzd_wipe traps unless the
++   range lies inside the pointer's bounds.  */
++#ifdef __TZD__
++#undef debug_fill
++#define debug_fill(ptr,size)	__tzd_wipe((ptr), (size))
++#endif
++
+ 
+ /* Get a completely new block from the system pool. Note that we rely on
+    malloc() to provide aligned memory. */

@@ -1,0 +1,31 @@
+TzD (task #42): the etherdevice _64bits helpers without 8-byte reads.
+ether_addr_equal_64bits() and is_multicast_ether_addr_64bits() read 8
+bytes from a 6-byte address on purpose (the callers keep 2 bytes of
+padding after it): out of the address's bounds, which TzD traps
+(eth_type_trans on eth->h_dest).  When compiled by TzD (__TZD__), they
+take their own #else branches, which read the 6 bytes only.  GCC builds
+are unchanged.
+--- a/include/linux/etherdevice.h	2026-11-13 21:00:49.739542110 +0900
++++ b/include/linux/etherdevice.h	2026-11-13 21:00:49.755232340 +0900
+@@ -143,7 +143,9 @@
+ 
+ static inline bool is_multicast_ether_addr_64bits(const u8 *addr)
+ {
+-#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && BITS_PER_LONG == 64
++/* TzD: an 8-byte read of a 6-byte address is out of its bounds.  */
++#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && BITS_PER_LONG == 64 && \
++	!defined(__TZD__)
+ #ifdef __BIG_ENDIAN
+ 	return 0x01 & ((*(const u64 *)addr) >> 56);
+ #else
+@@ -381,7 +383,9 @@
+ 
+ static inline bool ether_addr_equal_64bits(const u8 *addr1, const u8 *addr2)
+ {
+-#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && BITS_PER_LONG == 64
++/* TzD: an 8-byte read of a 6-byte address is out of its bounds.  */
++#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && BITS_PER_LONG == 64 && \
++	!defined(__TZD__)
+ 	u64 fold = (*(const u64 *)addr1) ^ (*(const u64 *)addr2);
+ 
+ #ifdef __BIG_ENDIAN

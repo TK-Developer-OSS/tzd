@@ -1,0 +1,63 @@
+--- a/main/alloc.c
++++ b/main/alloc.c
+@@ -23,6 +23,16 @@
+ 
+ #include "httpd.h"
+ #include "multithread.h"
++
++/* TzD (task #13): a pool hands out parts of one block.  Each part gets
++   exactly its own bounds, so a write past it -- into the next object or
++   the next block header -- traps instead of corrupting it.  A plain C
++   compiler sees the unchanged pointer.  */
++#ifdef __TZD__
++#define TZD_PART(p, n) __tzd_narrow((p), (n))
++#else
++#define TZD_PART(p, n) (p)
++#endif
+ #include "http_log.h"
+ 
+ #include <stdarg.h>
+@@ -710,7 +720,7 @@
+ 	debug_verify_filled(first_avail, blok->h.endp,
+ 	    "Ouch!  Someone trounced past the end of their allocation!\n");
+ 	blok->h.first_avail = new_first_avail;
+-	return (void *) first_avail;
++	return (void *) TZD_PART(first_avail, reqsize);
+     }
+ 
+     /* Nope --- get a new one that's guaranteed to be big enough */
+@@ -733,7 +743,7 @@
+     first_avail = blok->h.first_avail;
+     blok->h.first_avail += size;
+ 
+-    return (void *) first_avail;
++    return (void *) TZD_PART(first_avail, reqsize);
+ #endif
+ }
+ 
+@@ -923,7 +933,7 @@
+ #else
+     struct psprintf_data ps;
+     char *strp;
+-    int size;
++    int size, len;
+ 
+     ap_block_alarms();
+     ps.blok = p->last;
+@@ -939,6 +949,7 @@
+     *strp++ = '\0';
+ 
+     size = strp - ps.blok->h.first_avail;
++    len = size;			/* the string and its NUL */
+     size = (1 + ((size - 1) / CLICK_SZ)) * CLICK_SZ;
+     strp = ps.blok->h.first_avail;	/* save away result pointer */
+     ps.blok->h.first_avail += size;
+@@ -953,7 +964,7 @@
+     }
+     ap_unblock_alarms();
+ 
+-    return strp;
++    return TZD_PART(strp, len);
+ #endif
+ }
+ 

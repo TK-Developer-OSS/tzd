@@ -1,0 +1,55 @@
+#!/bin/bash
+# tzd: compiler driver wrapper for the TzD project.
+#   tzd hello.d -o hello      TzD
+#   tzd hello.c -o hello      Managed C (same front end)
+# Both .c and .d sources are compiled by cc1tzd.  Headers come from
+# include/ and libc2d/include/ (system headers are not used); libc2d.a is
+# linked when producing an executable.  Other options pass through to GCC.
+#
+#   --nolibc   link with libc2d only (own _start, no glibc)
+#   --host     use the host's system headers and libc (raw-C boundary:
+#              declarations in system headers keep native pointers;
+#              provisional, task #14).  Used for Apache.
+#
+# Env: TZD_GCC=<build dir holding xgcc and cc1tzd> (default: work/build-c/gcc)
+set -e
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+GCCDIR=${TZD_GCC:-$ROOT/work/build-c/gcc}
+[ -x "$GCCDIR/xgcc" ] && [ -x "$GCCDIR/cc1tzd" ] || {
+  echo "tzd: compiler not built in $GCCDIR (set TZD_GCC)" >&2; exit 1; }
+
+args=() ; link=1 ; prev= ; nolibc=0 ; host=0
+for a in "$@"; do
+  case "$a" in
+    --nolibc) nolibc=1; continue ;;
+    --host) host=1; continue ;;
+    -c|-S|-E|-fsyntax-only) link=0 ;;
+  esac
+  if [ "$prev" != "-o" ] && [[ "$a" == *.c || "$a" == *.d ]]; then
+    args+=(-x tzd "$a" -x none)
+  else
+    args+=("$a")
+  fi
+  prev=$a
+done
+
+extra=() ; pre=()
+if [ $link = 1 ]; then
+  [ -f "$ROOT/libc2d/build/libc2d.a" ] && [ -f "$ROOT/libc2d/build/crt0.o" ] || make -C "$ROOT/libc2d" >/dev/null
+  if [ $nolibc = 1 ]; then
+    pre+=(-nostdlib -nostartfiles -ffreestanding "$ROOT/libc2d/build/crt0.o")
+  fi
+  # The program's main is __tzd_main, called by libc2d's start-up, which
+  # comes last on the link line: ask for it first, so it is taken from an
+  # archive too (busybox's main is in libbb/lib.a).
+  pre+=(-Wl,-u,__tzd_main)
+  extra+=("$ROOT/libc2d/build/libc2d.a")
+fi
+
+if [ $host = 1 ]; then
+  inc=()
+else
+  inc=(-nostdinc -I"$ROOT/include" -I"$ROOT/libc2d/include")
+fi
+exec "$GCCDIR/xgcc" -B"$GCCDIR/" "${inc[@]}" \
+     "${pre[@]}" "${args[@]}" -fno-omit-frame-pointer "${extra[@]}"

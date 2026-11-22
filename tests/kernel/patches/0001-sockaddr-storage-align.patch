@@ -1,0 +1,16 @@
+TzD (task #42, TK 2026-11-13): a pointer slot off an 8-byte boundary is a
+compile error.  __kernel_sockaddr_storage holds `void *__align` only for
+its alignment, and the packed compat structs (compat_group_req and
+friends) put it at offset 4.  An unsigned long gives the same size and
+alignment and holds no pointer.  Nothing reads __align.
+--- a/include/uapi/linux/socket.h
++++ b/include/uapi/linux/socket.h
+@@ -22,7 +22,7 @@
+ 				/* space to achieve desired size, */
+ 				/* _SS_MAXSIZE value minus size of ss_family */
+ 		};
+-		void *__align; /* implementation specific desired alignment */
++		unsigned long __align; /* implementation specific desired alignment */
+ 	};
+ };
+ 

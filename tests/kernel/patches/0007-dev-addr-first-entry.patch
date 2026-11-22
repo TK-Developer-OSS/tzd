@@ -1,0 +1,21 @@
+TzD (task #42): dev_addr_mod() finds the device address entry by list.
+dev_addr_mod() goes back from dev->dev_addr (ha->addr, an array member)
+to its netdev_hw_addr with container_of.  TzD bounds a pointer to an
+array member to that array, so the step back to the entry traps
+(virtnet_probe).  dev->dev_addr is always the first entry of
+dev->dev_addrs (dev_addr_init() sets it so, and dev_addr_del() refuses
+to remove it): take that entry as dev_addr_init() does.
+--- a/net/core/dev_addr_lists.c	2026-11-13 20:42:18.643168274 +0900
++++ b/net/core/dev_addr_lists.c	2026-11-13 20:42:18.660720964 +0900
+@@ -576,7 +576,10 @@
+ 
+ 	dev_addr_check(dev);
+ 
+-	ha = container_of(dev->dev_addr, struct netdev_hw_addr, addr[0]);
++	/* dev->dev_addr is the first entry's addr (dev_addr_init), and
++	   dev_addr_del() never removes that entry.  */
++	ha = list_first_entry(&dev->dev_addrs.list,
++			      struct netdev_hw_addr, list);
+ 	rb_erase(&ha->node, &dev->dev_addrs.tree);
+ 	memcpy(&ha->addr[offset], addr, len);
+ 	memcpy(&dev->dev_addr_shadow[offset], addr, len);

@@ -1,0 +1,65 @@
+--- a/lib/expat-lite/xmlparse.c
++++ b/lib/expat-lite/xmlparse.c
+@@ -974,7 +974,7 @@
+ 					    const char *end,
+ 					    const char **endPtr)
+ {
+-  const char *next;
++  const char *next = start; /* the tokenizer does not always set it */
+   int tok = XmlContentTok(encoding, start, end, &next);
+   switch (tok) {
+   case XML_TOK_BOM:
+@@ -1005,7 +1005,7 @@
+ 					    const char *end,
+ 					    const char **endPtr)
+ {
+-  const char *next;
++  const char *next = start; /* the tokenizer does not always set it */
+   int tok = XmlContentTok(encoding, start, end, &next);
+   switch (tok) {
+   case XML_TOK_XML_DECL:
+@@ -1764,7 +1764,7 @@
+   *eventPP = s;
+   *startPtr = 0;
+   for (;;) {
+-    const char *next;
++    const char *next = s; /* the tokenizer does not always set it */
+     int tok = XmlCdataSectionTok(enc, s, end, &next);
+     *eventEndPP = next;
+     switch (tok) {
+@@ -1972,7 +1972,7 @@
+ 		const char **nextPtr)
+ {
+   for (;;) {
+-    const char *next;
++    const char *next = s; /* the tokenizer does not always set it */
+     int tok = XmlPrologTok(encoding, s, end, &next);
+     if (tok <= 0) {
+       if (nextPtr != 0 && tok != XML_TOK_INVALID) {
+@@ -2287,7 +2287,7 @@
+   processor = epilogProcessor;
+   eventPtr = s;
+   for (;;) {
+-    const char *next;
++    const char *next = s; /* the tokenizer does not always set it */
+     int tok = XmlPrologTok(encoding, s, end, &next);
+     eventEndPtr = next;
+     switch (tok) {
+@@ -2368,7 +2368,7 @@
+ {
+   const ENCODING *internalEnc = ns ? XmlGetInternalEncodingNS() : XmlGetInternalEncoding();
+   for (;;) {
+-    const char *next;
++    const char *next = ptr; /* the tokenizer does not always set it */
+     int tok = XmlAttributeValueTok(enc, ptr, end, &next);
+     switch (tok) {
+     case XML_TOK_NONE:
+@@ -2493,7 +2493,7 @@
+   entityTextPtr += encoding->minBytesPerChar;
+   entityTextEnd -= encoding->minBytesPerChar;
+   for (;;) {
+-    const char *next;
++    const char *next = entityTextPtr; /* the tokenizer does not always set it */
+     int tok = XmlEntityValueTok(encoding, entityTextPtr, entityTextEnd, &next);
+     switch (tok) {
+     case XML_TOK_PARAM_ENTITY_REF:

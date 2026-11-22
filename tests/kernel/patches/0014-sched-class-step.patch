@@ -1,0 +1,22 @@
+TzD (task #75): next_active_class steps between sched classes.
+Each sched class (stop, dl, rt, fair, ext, idle) is a separate object;
+only the linker script (SCHED_DATA) lays them out back to back between
+__sched_class_highest and __sched_class_lowest.  With CONFIG_SMP=y,
+put_prev_task_balance starts from prev->sched_class and class++ walks
+past the end of that object into the next one (kc2d traps the read of
+->balance in kernel/sched/core.c).  The compiler cannot know two objects
+are adjacent, so the step is taken through the linker array instead.
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -2519,6 +2519,11 @@
+  */
+ static inline const struct sched_class *next_active_class(const struct sched_class *class)
+ {
++#ifdef __TZD__
++	/* Each class is its own object; only the linker places them in one
++	 * array.  Step through that array, not past the end of one object. */
++	class = &__sched_class_highest[class - __sched_class_highest];
++#endif
+ 	class++;
+ #ifdef CONFIG_SCHED_CLASS_EXT
+ 	if (scx_switched_all() && class == &fair_sched_class)

@@ -1,0 +1,30 @@
+--- a/include/openssl/core_dispatch.h	2026-04-07 21:26:30.000000000 +0900
++++ b/include/openssl/core_dispatch.h	2026-11-15 12:32:37.105112045 +0900
+@@ -52,13 +52,26 @@
+  * Note: This is considered a "reserved" internal macro. Applications should
+  * not use this or assume its existence.
+  */
++/* TzD (task #61, #22): a function pointer stored in the dispatch table as
++ * the generic void(*)(void) carries no type at run time, so cc1tzd rejects
++ * the plain cast back to the typed pointer.  __tzd_fncast checks, at run
++ * time, that opf->function was registered (where it was erased to the
++ * generic type) with this interface's id, and traps otherwise -- the
++ * contract is enforced instead of the cast being trusted.  GCC builds use
++ * the ordinary cast.  */
++#ifdef __TZD__
++# define OSSL_FUNC_EXTRACT(T, opf) __tzd_fncast(T, (opf)->function)
++#else
++# define OSSL_FUNC_EXTRACT(T, opf) ((T *)(opf)->function)
++#endif
++
+ #define OSSL_CORE_MAKE_FUNC(type, name, args)          \
+     typedef type(OSSL_FUNC_##name##_fn) args;          \
+     static ossl_unused ossl_inline                     \
+         OSSL_FUNC_##name##_fn *                        \
+         OSSL_FUNC_##name(const OSSL_DISPATCH *opf)     \
+     {                                                  \
+-        return (OSSL_FUNC_##name##_fn *)opf->function; \
++        return OSSL_FUNC_EXTRACT(OSSL_FUNC_##name##_fn, opf); \
+     }
+ 
+ /*

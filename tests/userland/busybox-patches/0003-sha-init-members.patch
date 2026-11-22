@@ -1,0 +1,32 @@
+--- a/libbb/hash_md5_sha.c
++++ b/libbb/hash_md5_sha.c
+@@ -1223,8 +1223,10 @@
+    (FIPS 180-2:5.3.2)  */
+ void FAST_FUNC sha256_begin(sha256_ctx_t *ctx)
+ {
+-	memcpy(&ctx->total64, init256, sizeof(init256));
+-	/*ctx->total64 = 0; - done by prepending two 32-bit zeros to init256 */
++	/* TzD: each member on its own (one memcpy across total64 and hash[]
++	 * writes outside total64) */
++	ctx->total64 = 0;
++	memcpy(ctx->hash, &init256[2], sizeof(ctx->hash));
+ 	ctx->process_block = sha256_process_block64;
+ #if ENABLE_SHA256_HWACCEL
+ # if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+@@ -1247,11 +1249,11 @@
+ void FAST_FUNC sha512_begin(sha512_ctx_t *ctx)
+ {
+ 	int i;
+-	/* Two extra iterations zero out ctx->total64[2] */
+-	uint64_t *tp = ctx->total64;
+-	for (i = 0; i < 8 + 2; i++)
+-		tp[i] = ((uint64_t)(init256[i]) << 32) + init512_lo[i];
+-	/*ctx->total64[0] = ctx->total64[1] = 0; - already done */
++	/* TzD: total64[] and hash[] each on its own (one loop over both
++	 * writes outside total64[]) */
++	ctx->total64[0] = ctx->total64[1] = 0;
++	for (i = 0; i < 8; i++)
++		ctx->hash[i] = ((uint64_t)(init256[i + 2]) << 32) + init512_lo[i + 2];
+ }
+ 
+ void FAST_FUNC sha512_hash(sha512_ctx_t *ctx, const void *buffer, size_t len)

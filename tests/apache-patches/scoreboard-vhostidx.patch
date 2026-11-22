@@ -1,0 +1,90 @@
+diff -ru a/include/scoreboard.h b/include/scoreboard.h
+--- a/include/scoreboard.h	2026-11-06 01:26:41.567274766 +0900
++++ b/include/scoreboard.h	2026-11-06 01:26:41.611447604 +0900
+@@ -117,10 +117,20 @@
+ #endif
+     char client[32];		/* Keep 'em small... */
+     char request[64];		/* We just want an idea... */
+-    server_rec *vhostrec;	/* What virtual host is being accessed? */
+-                                /* SEE ABOVE FOR SAFE USAGE! */
++    int vhostidx;		/* What virtual host is being accessed?
++				 * TzD: position in the server_rec list
++				 * (-1: none), not a pointer -- the scoreboard
++				 * is shared memory any child can write, so
++				 * it holds no pointers (TzD task #33).
++				 * SEE ABOVE FOR SAFE USAGE! */
+ } short_score;
+ 
++/* TzD: vhostidx <-> server_rec (list built before fork, the same in every
++ * child of a generation).  ap_tzd_vhost_at returns NULL for an index that
++ * is not in the list.  */
++API_EXPORT(int) ap_tzd_vhost_index(server_rec *s);
++API_EXPORT(server_rec *) ap_tzd_vhost_at(int idx);
++
+ typedef struct {
+     ap_generation_t running_generation;	/* the generation of children which
+                                          * should still be serving requests. */
+diff -ru a/main/http_main.c b/main/http_main.c
+--- a/main/http_main.c	2026-11-06 01:26:41.580085315 +0900
++++ b/main/http_main.c	2026-11-06 01:26:41.612634370 +0900
+@@ -283,6 +283,30 @@
+ /* *Non*-shared http_main globals... */
+ 
+ static server_rec *server_conf;
++
++/* TzD (task #33): the scoreboard names a vhost by its position in the
++ * server_rec list instead of a pointer.  */
++API_EXPORT(int) ap_tzd_vhost_index(server_rec *s)
++{
++    server_rec *v;
++    int i = 0;
++    for (v = server_conf; v != NULL; v = v->next, i++)
++	if (v == s)
++	    return i;
++    return -1;
++}
++
++API_EXPORT(server_rec *) ap_tzd_vhost_at(int idx)
++{
++    server_rec *v;
++    int i = 0;
++    if (idx < 0)
++	return NULL;
++    for (v = server_conf; v != NULL; v = v->next, i++)
++	if (i == idx)
++	    return v;
++    return NULL;
++}
+ #ifndef NETWARE
+ static JMP_BUF APACHE_TLS jmpbuffer;
+ #endif
+@@ -2685,7 +2709,7 @@
+ 					       r->assbackwards ? NULL : " ", r->protocol, NULL),
+ 				       sizeof(ss->request));
+ 	    }
+-	    ss->vhostrec =  r->server;
++	    ss->vhostidx = ap_tzd_vhost_index(r->server);
+ 	}
+     }
+     if (status == SERVER_DEAD) {
+@@ -2695,7 +2719,7 @@
+ 	/* clean up the slot's vhostrec pointer (maybe re-used)
+ 	 * and mark the slot as belonging to a new generation.
+ 	 */
+-	ss->vhostrec = NULL;
++	ss->vhostidx = -1;
+ 	ap_scoreboard_image->parent[child_num].generation = ap_my_generation;
+ #ifdef SCOREBOARD_FILE
+ 	lseek(scoreboard_fd, XtOffsetOf(scoreboard, parent[child_num]), 0);
+diff -ru a/modules/standard/mod_status.c b/modules/standard/mod_status.c
+--- a/modules/standard/mod_status.c	2026-11-06 01:26:41.589336219 +0900
++++ b/modules/standard/mod_status.c	2026-11-06 01:26:41.613013788 +0900
+@@ -451,7 +451,7 @@
+ 	for (i = 0; i < HARD_SERVER_LIMIT; ++i) {
+ 	    score_record = ap_scoreboard_image->servers[i];
+ 	    ps_record = ap_scoreboard_image->parent[i];
+-	    vhost = score_record.vhostrec;
++	    vhost = ap_tzd_vhost_at(score_record.vhostidx);
+ 	    if (ps_record.generation != ap_my_generation) {
+ 		vhost = NULL;
+ 	    }

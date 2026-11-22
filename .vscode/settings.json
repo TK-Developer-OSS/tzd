@@ -1,0 +1,14 @@
+{
+  "//": "work/ holds ~10 GB of third-party source (Linux kernel, OpenSSL, OpenSSH, Apache, PHP, MySQL, busybox). The C/C++ extension indexing it grew to >3 GB RSS and OOM-froze the machine (2026-11-15). Keep IntelliSense for the TzD source (gcc-tzd, libc2d, tests) but not for work/.",
+  "C_Cpp.files.exclude": {
+    "**/.git/**": true,
+    "**/work/**": true
+  },
+  "files.watcherExclude": {
+    "**/work/**": true,
+    "**/.git/objects/**": true
+  },
+  "search.exclude": {
+    "**/work/**": true
+  }
+}

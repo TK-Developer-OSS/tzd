@@ -1,0 +1,161 @@
+--- a/functions/zlib.c
++++ b/functions/zlib.c
+@@ -111,7 +111,7 @@
+ DLEXPORT php3_module_entry *get_module(void) { return &php3_zlib_module_entry; }
+ #endif
+ 
+-static void php3i_destructor_gzclose(gzFile *zp) {
++static void php3i_destructor_gzclose(gzFile zp) {
+ 	(void)gzclose(zp);
+ }
+ 
+@@ -134,7 +134,7 @@
+ 		PUTS(").");
+ }
+ 
+-static gzFile *php3_gzopen_with_path(char *filename, char *mode, char *path, char **opened_path);
++static gzFile php3_gzopen_with_path(char *filename, char *mode, char *path, char **opened_path);
+ 
+ static gzFile php3_gzopen_wrapper(char *path, char *mode, int options)
+ {
+@@ -154,12 +154,12 @@
+  * Tries to open a .gz-file with a PATH-style list of directories.
+  * If the filename starts with "." or "/", the path is ignored.
+  */
+-static gzFile *php3_gzopen_with_path(char *filename, char *mode, char *path, char **opened_path)
++static gzFile php3_gzopen_with_path(char *filename, char *mode, char *path, char **opened_path)
+ {
+ 	char *pathbuf, *ptr, *end;
+ 	char trypath[MAXPATHLEN + 1];
+ 	struct stat sb;
+-	gzFile *zp;
++	gzFile zp;
+ 	
+ 	if (opened_path) {
+ 		*opened_path = NULL;
+@@ -311,7 +311,7 @@
+    Open a .gz-file and return a .gz-file pointer */
+ void php3_gzopen(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1, *arg2, *arg3;
+-	gzFile *zp;
++	gzFile zp;
+ 	char *p;
+ 	int id;
+ 	int use_include_path = 0;
+@@ -359,7 +359,7 @@
+ void php3_gzclose(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1;
+ 	int id, type;
+-	gzFile *zp;
++	gzFile zp;
+ 	
+ 	if (ARG_COUNT(ht) != 1 || getParameters(ht, 1, &arg1) == FAILURE) {
+ 		WRONG_PARAM_COUNT;
+@@ -380,7 +380,7 @@
+    Test for end-of-file on a .gz-file pointer */
+ void php3_gzeof(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1;
+-	gzFile *zp;
++	gzFile zp;
+ 	int id, type;
+ 	
+ 	if (ARG_COUNT(ht) != 1 || getParameters(ht, 1, &arg1) == FAILURE) {
+@@ -406,7 +406,7 @@
+    Get a line from .gz-file pointer */
+ void php3_gzgets(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1, *arg2;
+-	gzFile *zp;
++	gzFile zp;
+ 	int id, len, type;
+ 	char *buf;
+ 	
+@@ -446,7 +446,7 @@
+    Get a character from .gz-file pointer */
+ void php3_gzgetc(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1;
+-	gzFile *zp;
++	gzFile zp;
+ 	int id, type, c;
+ 	char *buf;
+ 	
+@@ -462,7 +462,7 @@
+ 		RETURN_FALSE;
+ 	}
+ 	buf = emalloc(sizeof(char) * 2);
+-	if ((c=gzgetc(zp)) == (-1)) {
++	if ((c=(gzgetc)(zp)) == (-1)) {
+ 		efree(buf);
+ 		RETVAL_FALSE;
+ 	} else {
+@@ -483,7 +483,7 @@
+ void php3_gzgetss(INTERNAL_FUNCTION_PARAMETERS)
+ {
+ 	pval *fd, *bytes, *allow=NULL;
+-	gzFile *zp;
++	gzFile zp;
+ 	int id, len, br, type;
+ 	char *buf, *p, *rbuf, *rp, c, lc;
+ 	
+@@ -541,7 +541,7 @@
+    Binary-safe .gz-file write */
+ void php3_gzwrite(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1, *arg2, *arg3=NULL;
+-	gzFile *zp;
++	gzFile zp;
+ 	int ret,id,type;
+ 	int num_bytes;
+ 
+@@ -590,7 +590,7 @@
+ void php3_gzrewind(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1;
+ 	int id,type;
+-	gzFile *zp;
++	gzFile zp;
+ 	
+ 	if (ARG_COUNT(ht) != 1 || getParameters(ht, 1, &arg1) == FAILURE) {
+ 		WRONG_PARAM_COUNT;
+@@ -613,7 +613,7 @@
+ 	pval *arg1;
+ 	int id, type;
+ 	long pos;
+-	gzFile *zp;
++	gzFile zp;
+ 	
+ 	if (ARG_COUNT(ht) != 1 || getParameters(ht, 1, &arg1) == FAILURE) {
+ 		WRONG_PARAM_COUNT;
+@@ -636,7 +636,7 @@
+ 	pval *arg1, *arg2;
+ 	int ret,id,type;
+ 	long pos;
+-	gzFile *zp;
++	gzFile zp;
+ 	
+ 	if (ARG_COUNT(ht) != 2 || getParameters(ht, 2, &arg1, &arg2) == FAILURE) {
+ 		WRONG_PARAM_COUNT;
+@@ -663,7 +663,7 @@
+ void php3_readgzfile(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1, *arg2;
+ 	char buf[8192];
+-	gzFile *zp;
++	gzFile zp;
+ 	int b, size;
+ 	int use_include_path = 0;
+ 
+@@ -716,7 +716,7 @@
+    Output all remaining data from a .gz-file pointer */
+ void php3_gzpassthru(INTERNAL_FUNCTION_PARAMETERS) {
+ 	pval *arg1;
+-	gzFile *zp;
++	gzFile zp;
+ 	char buf[8192];
+ 	int id, size, b, type;
+ 	
+@@ -748,7 +748,7 @@
+ void php3_gzread(INTERNAL_FUNCTION_PARAMETERS)
+ {
+ 	pval *arg1, *arg2;
+-	gzFile *zp;
++	gzFile zp;
+ 	int id, len, type;
+ 	
+ 	if (ARG_COUNT(ht) != 2 || getParameters(ht, 2, &arg1, &arg2) == FAILURE) {

@@ -1,0 +1,37 @@
+TzD (task #75, TK 2026-11-19): cc1tzd cannot parse (typeof(expr) *) as a
+cast type in macro expansion context.  arch/x86/include/asm/percpu.h
+__my_cpu_ptr expands to:
+  (__my_cpu_type(*(ptr))*)(__force uintptr_t)(ptr)
+which after __my_cpu_type expansion becomes:
+  (typeof(*(ptr)) *)(uintptr_t)(ptr)
+cc1tzd's parser treats (__my_cpu_type(*(ptr))) as an expression subterm
+and then fails on the trailing '*' ("expected expression before ')'").
+
+With CONFIG_SMP=n the problem was invisible because the functions using
+this macro (scheduler, preemption) were never instantiated (static inline,
+never called).  With CONFIG_SMP=y they are called and compiled.
+
+The fix: guard with #ifdef __TZD__ (defined via -D__TZD__ in tzd-cc.sh
+when cc1tzd compiles kernel files) and use typeof only in declaration
+context (which cc1tzd handles) so the pointer conversion goes via void *
+inside a compound statement.  The assignment void*->T* is implicit in C99
+and is valid here.
+--- a/arch/x86/include/asm/percpu.h
++++ b/arch/x86/include/asm/percpu.h
+@@ -94,3 +94,15 @@
+ #define __my_cpu_type(var)	typeof(var) __percpu_seg_override
+-#define __my_cpu_ptr(ptr)	(__my_cpu_type(*(ptr))*)(__force uintptr_t)(ptr)
++#ifndef __TZD__
++#define __my_cpu_ptr(ptr)	(__my_cpu_type(*(ptr))*)(__force uintptr_t)(ptr)
++#else
++/* cc1tzd cannot parse (typeof(expr) *) as a cast type in macro expansion:
++ * the parser sees (__my_cpu_type(*(ptr))) as an expression subterm and
++ * then fails on the trailing '*'.  Use typeof only in declaration context
++ * (which cc1tzd handles correctly) so the type conversion goes through
++ * void * inside a compound statement. */
++#define __my_cpu_ptr(ptr)	({			\
++	typeof(*(ptr)) *__mcp__;			\
++	__mcp__ = (void *)((unsigned long)(ptr));	\
++	__mcp__; })
++#endif
+ #define __my_cpu_var(var)	(*__my_cpu_ptr(&(var)))

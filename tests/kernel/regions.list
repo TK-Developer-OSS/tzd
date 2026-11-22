@@ -1,0 +1,15 @@
+# Bounds of linker-script symbols, stated explicitly (task #75).
+# cc1tzd bounds `extern T x[]` by __tzd_size.x; tzd_sizes.py otherwise
+# takes the ELF size or the bytes to the end of the output section.  A
+# symbol listed here gets exactly the region the linker script gives it:
+#   NAME  FROM  TO      size of NAME = addr(TO) - addr(FROM)
+# A listed symbol that is not in the kernel stops the build.
+
+# The per-CPU template (x86_64 SMP links .data..percpu at 0 and loads it
+# at __per_cpu_load, outside any output section with a nonzero address):
+# the image of __per_cpu_start..__per_cpu_end.
+__per_cpu_load          __per_cpu_start         __per_cpu_end
+
+# The sched classes, laid out by SCHED_DATA (include/asm-generic/vmlinux.lds.h)
+# from highest to lowest priority (kernel patch 0014 steps through them).
+__sched_class_highest   __sched_class_highest   __sched_class_lowest

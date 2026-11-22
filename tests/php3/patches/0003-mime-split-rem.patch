@@ -1,0 +1,20 @@
+--- a/functions/mime.c
++++ b/functions/mime.c
+@@ -61,7 +61,7 @@
+ 	while ((ptr - buf < cnt) && !Done) {
+ 		switch (state) {
+ 			case 0:			/* Looking for mime boundary */
+-				loc = memchr(ptr, *boundary, cnt);
++				loc = memchr(ptr, *boundary, rem);
+ 				if (loc) {
+ 					if (!strncmp(loc, boundary, len)) {
+ 
+@@ -111,7 +111,7 @@
+ 					}
+ 					lbuf = emalloc(s-name + MAX(MAX(sizeof("_name"),sizeof("_size")),sizeof("_type")) + 4);
+ 					state = 2;
+-					loc2 = memchr(loc + 1, '\n', rem);
++					loc2 = memchr(loc + 1, '\n', rem - (loc + 1 - ptr));
+ 					rem -= (loc2 - ptr) + 1;
+ 					ptr = loc2 + 1;
+ 				} else {

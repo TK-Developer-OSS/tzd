@@ -1,0 +1,17 @@
+; TzD-specific options.
+
+ftzd-dump-tokens
+Common Var(flag_tzd_dump_tokens) Init(0)
+Print the TzD token stream instead of compiling.
+
+ftzd-kernel
+Common Var(flag_tzd_kernel) Init(0)
+Kernel mode (task #42): a managed pointer made from a raw address (an integer, an asm output, a native function) gets its bounds from the runtime's tzd_from_native, which looks up the memory region.
+
+ftzd-mpx
+Common Var(flag_tzd_mpx) Init(0)
+Experimental: check pointer bounds with Intel MPX instructions (bndmk, bndcl, bndcu; Skylake to Comet Lake) instead of compare and branch.  User programs only; the program stops at start-up when the CPU or the OS does not provide MPX.
+
+ftzd-native=
+Common Joined RejectNegative Var(tzd_native_file)
+File listing functions (one name per line) that use the native C calling convention, e.g. those written in assembly (task #42).

@@ -1,0 +1,11 @@
+# TzD front end: language registration for the GCC build system.
+# Own parser/semantics in tzd/; reuses c-family/ only (gcc/c/ is not linked).
+language="tzd"
+
+compilers="cc1tzd\$(exeext)"
+
+target_libs=
+
+lang_requires="c"
+
+gtfiles="\$(srcdir)/tzd/tzd-lang.cc \$(srcdir)/tzd/tzd-decl.cc \$(srcdir)/tzd/tzd-parse.cc \$(srcdir)/c-family/c-common.cc \$(srcdir)/c-family/c-common.h \$(srcdir)/c-family/c-objc.h \$(srcdir)/c-family/c-cppbuiltin.cc \$(srcdir)/c-family/c-pragma.h \$(srcdir)/c-family/c-pragma.cc \$(srcdir)/c-family/c-format.cc"

@@ -1,0 +1,17 @@
+TzD (task #75): print the ACPI table signature with a precision.
+acpi_reserve_initial_tables prints table_desc->signature.ascii, a
+char[4] with no terminating NUL, with "%4s".  A width is a minimum, not
+a maximum, so vsprintf reads past the 4-byte field (kc2d traps the read
+of byte 5).  "%4.4s" reads exactly the four signature bytes, as the
+other signature prints in drivers/acpi already do.
+--- a/drivers/acpi/tables.c
++++ b/drivers/acpi/tables.c
+@@ -737,7 +737,7 @@
+ 		if (!start || !size)
+ 			break;
+ 
+-		pr_info("Reserving %4s table memory at [mem 0x%llx-0x%llx]\n",
++		pr_info("Reserving %4.4s table memory at [mem 0x%llx-0x%llx]\n",
+ 			table_desc->signature.ascii, start, start + size - 1);
+ 
+ 		memblock_reserve(start, size);

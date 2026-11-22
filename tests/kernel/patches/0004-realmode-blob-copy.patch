@@ -1,0 +1,20 @@
+TzD (task #42): setup_real_mode copies only the real-mode blob.
+memcpy(base, real_mode_blob, size) copies PAGE_ALIGN(blob size) bytes:
+past real_mode_blob_end, into real_mode_relocs and beyond (an
+out-of-bounds read; kc2d's checked memcpy traps).  Copy the blob and
+zero the rest of the page instead.
+--- a/arch/x86/realmode/init.c	2026-11-13 18:41:43.650118582 +0900
++++ b/arch/x86/realmode/init.c	2026-11-13 18:41:43.665768302 +0900
+@@ -111,7 +111,11 @@
+ 	if (cc_platform_has(CC_ATTR_HOST_MEM_ENCRYPT))
+ 		set_memory_decrypted((unsigned long)base, size >> PAGE_SHIFT);
+ 
+-	memcpy(base, real_mode_blob, size);
++	/* The blob, then zeros up to the page boundary (not the bytes that
++	   follow the blob in the kernel image).  */
++	memcpy(base, real_mode_blob, real_mode_blob_end - real_mode_blob);
++	memset(base + (real_mode_blob_end - real_mode_blob), 0,
++	       size - (real_mode_blob_end - real_mode_blob));
+ 
+ 	phys_base = __pa(base);
+ 	real_mode_seg = phys_base >> 4;

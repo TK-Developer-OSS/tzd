@@ -1,0 +1,22 @@
+TzD (task #42): mab_mas_cp() writes pivots only inside pivots[].
+For a full node the copy loop writes pivots[mt_pivots[mt]], one past the
+pivot array: it lands on slots[0] of the same node, which the memcpy
+right after overwrites, so the store has no effect.  TzD bounds &pivot
+to the array and traps (kdevtmpfs).  Skip the store past the array.
+--- a/lib/maple_tree.c	2026-11-13 19:14:02.696690659 +0900
++++ b/lib/maple_tree.c	2026-11-13 19:14:02.722193868 +0900
+@@ -1995,7 +1995,13 @@
+ 
+ 	i = mab_start;
+ 	do {
+-		pivots[j++] = b_node->pivot[i++];
++		/* A node has one pivot fewer than slots: the last slot's is
++		   the node's maximum.  pivots[mt_pivots[mt]] would land on
++		   slots[0], which the memcpy below writes anyway.  */
++		if (j < mt_pivots[mt])
++			pivots[j] = b_node->pivot[i];
++		j++;
++		i++;
+ 	} while (i <= mab_end && likely(b_node->pivot[i]));
+ 
+ 	memcpy(slots, b_node->slot + mab_start,

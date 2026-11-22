@@ -1,0 +1,18 @@
+TzD (task #42): sock_copy() copies the tail of struct sock from the socket.
+The second copy starts at &nsk->sk_dontcopy_end, a zero-length marker
+array, and runs to the end of the object: TzD bounds the marker to its
+0 bytes and kc2d's checked memcpy traps (sk_clone_lock on an accepted
+TCP connection).  Address the tail from the socket with offsetof, as the
+first copy does: the same bytes, bounded by the object.
+--- a/net/core/sock.c	2026-11-13 22:45:23.119802173 +0900
++++ b/net/core/sock.c	2026-11-13 22:45:23.135467977 +0900
+@@ -2152,7 +2152,8 @@
+ 
+ 	memcpy(nsk, osk, offsetof(struct sock, sk_dontcopy_begin));
+ 
+-	unsafe_memcpy(&nsk->sk_dontcopy_end, &osk->sk_dontcopy_end,
++	unsafe_memcpy((u8 *)nsk + offsetof(struct sock, sk_dontcopy_end),
++		      (const u8 *)osk + offsetof(struct sock, sk_dontcopy_end),
+ 		      prot->obj_size - offsetof(struct sock, sk_dontcopy_end),
+ 		      /* alloc is larger than struct, see sk_prot_alloc() */);
+ 

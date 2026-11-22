@@ -1,0 +1,17 @@
+TzD (task #42): clear the tail of struct sock from sk, not from a member.
+sk_prot_clear_nulls() clears from sk->sk_node.pprev to the end of the
+object with memset(&sk->sk_node.pprev, ...): a pointer to one 8-byte
+member used for the bytes after it, which TzD bounds to that member
+(kc2d's checked memset traps).  Write it as memset_startat() does,
+(u8 *)sk + offsetof(...): the bounds of the whole object.
+--- a/include/net/sock.h	2026-11-13 18:44:45.861781426 +0900
++++ b/include/net/sock.h	2026-11-13 18:44:45.877316416 +0900
+@@ -1222,7 +1222,7 @@
+ {
+ 	if (offsetof(struct sock, sk_node.next) != 0)
+ 		memset(sk, 0, offsetof(struct sock, sk_node.next));
+-	memset(&sk->sk_node.pprev, 0,
++	memset((u8 *)sk + offsetof(struct sock, sk_node.pprev), 0,
+ 	       size - offsetof(struct sock, sk_node.pprev));
+ }
+ 

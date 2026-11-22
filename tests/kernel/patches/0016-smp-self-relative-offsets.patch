@@ -1,0 +1,41 @@
+TzD (task #78): the CONFIG_SMP self-relative references, as in 0002.
+alternatives_smp_lock(), alternatives_smp_unlock() and
+alternatives_text_reserved() reach the lock prefix in kernel text from a
+__smp_locks entry by adding the entry's own address to the offset it
+holds, as pointer arithmetic: the result lies outside the __smp_locks
+array, which is undefined in C and traps in TzD (the pointer keeps the
+array's bounds).  0002 was written for CONFIG_SMP=n (6.12.116), where
+these functions are not compiled; an SMP kernel booted on one CPU runs
+alternatives_smp_unlock() (UP patching) and trapped there.  The sum is
+done on unsigned long, as the kernel's own offset_to_ptr() does: the
+result is an address made from an integer (in kernel mode, bounded by
+its region: the kernel image).
+--- a/arch/x86/kernel/alternative.c
++++ b/arch/x86/kernel/alternative.c
+@@ -1626,7 +1626,7 @@
+ 	const s32 *poff;
+ 
+ 	for (poff = start; poff < end; poff++) {
+-		u8 *ptr = (u8 *)poff + *poff;
++		u8 *ptr = (u8 *)((unsigned long)poff + *poff);
+ 
+ 		if (!*poff || ptr < text || ptr >= text_end)
+ 			continue;
+@@ -1642,7 +1642,7 @@
+ 	const s32 *poff;
+ 
+ 	for (poff = start; poff < end; poff++) {
+-		u8 *ptr = (u8 *)poff + *poff;
++		u8 *ptr = (u8 *)((unsigned long)poff + *poff);
+ 
+ 		if (!*poff || ptr < text || ptr >= text_end)
+ 			continue;
+@@ -1761,7 +1761,7 @@
+ 		if (mod->text > text_end || mod->text_end < text_start)
+ 			continue;
+ 		for (poff = mod->locks; poff < mod->locks_end; poff++) {
+-			const u8 *ptr = (const u8 *)poff + *poff;
++			const u8 *ptr = (const u8 *)((unsigned long)poff + *poff);
+ 
+ 			if (text_start <= ptr && text_end > ptr)
+ 				return 1;

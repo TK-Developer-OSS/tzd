@@ -1,0 +1,69 @@
+# TzD front end Make fragment.  cc1tzd = tzd/*.o + c-family/ (without
+# c-opts.o, which is forked as tzd/tzd-opts.cc).  gcc/c/ is not linked.
+
+tzd: cc1tzd$(exeext)
+tzd.serial = cc1tzd$(exeext)
+
+.PHONY: tzd
+
+tzd-warn = $(STRICT_WARN)
+
+TZD_OBJS = tzd/tzd-lang.o tzd/tzd-lex.o tzd/tzd-opts.o tzd/tzd-decl.o \
+  tzd/tzd-parse.o tzd/tzd-pass.o c-family/stub-objc.o attribs.o \
+  $(filter-out c-family/c-opts.o,$(C_COMMON_OBJS)) $(C_TARGET_OBJS)
+
+# The front end's own objects read the option variables of lang.opt
+# (flag_tzd_kernel, ...): rebuild them when options.h changes.  The
+# automatic dependencies do not cover it here (2026-11-13: stale
+# tzd-opts.o after a new option broke the include paths).
+tzd/tzd-lang.o tzd/tzd-lex.o tzd/tzd-opts.o tzd/tzd-decl.o tzd/tzd-parse.o tzd/tzd-pass.o: options.h
+
+# gengtype's output first: a new GTY root in a source file must be in the
+# gt-*.h the object is compiled with.  Under make -j the object was once
+# compiled before the regenerated header was in place (2026-11-17: the
+# new root was not registered, its identifier was collected, and the
+# kernel's net/core/dev.c got a call with an empty name).
+tzd/tzd-parse.o tzd/tzd-decl.o tzd/tzd-lang.o: s-gtype
+
+cc1tzd-checksum.cc : build/genchecksum$(build_exeext) checksum-options \
+	$(TZD_OBJS) $(BACKEND) $(LIBDEPS)
+	build/genchecksum$(build_exeext) $(TZD_OBJS) $(BACKEND) $(LIBDEPS) \
+	  checksum-options > $@.tmp && \
+	$(srcdir)/../move-if-change $@.tmp $@
+
+cc1tzd$(exeext): $(TZD_OBJS) cc1tzd-checksum.o $(BACKEND) $(LIBDEPS)
+	@$(call LINK_PROGRESS,$(INDEX.tzd),start)
+	+$(LLINKER) $(ALL_LINKERFLAGS) $(LDFLAGS) -o $@ $(TZD_OBJS) \
+	  cc1tzd-checksum.o $(BACKEND) $(LIBS) $(BACKENDLIBS)
+	@$(call LINK_PROGRESS,$(INDEX.tzd),end)
+
+tzd.srcextra:
+tzd.all.cross:
+tzd.start.encap:
+tzd.rest.encap:
+tzd.info:
+tzd.install-info:
+tzd.dvi:
+tzd.install-dvi:
+tzd.pdf:
+tzd.install-pdf:
+tzd.html:
+tzd.install-html:
+tzd.man:
+tzd.srcinfo:
+tzd.srcman:
+tzd.install-plugin:
+tzd.tags:
+tzd.install-common:
+tzd.install-man:
+tzd.uninstall:
+tzd.mostlyclean:
+	-rm -f tzd/*$(objext)
+	-rm -f cc1tzd$(exeext)
+tzd.clean: tzd.mostlyclean
+tzd.distclean:
+	-rm -f tzd/Makefile
+tzd.maintainer-clean:
+
+lang_checks +=
+selftest-tzd:

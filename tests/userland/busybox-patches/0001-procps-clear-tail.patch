@@ -1,0 +1,18 @@
+TzD (task #52): procps_scan clears the tail of procps_status_t from sp.
+memset(&sp->vsz, 0, sizeof(*sp) - offsetof(procps_status_t, vsz)) clears
+from the vsz member to the end of the struct through a pointer to that
+one member, which TzD bounds to the member (the write traps in ps).
+Address the tail from the struct with offsetof: the same bytes, bounded
+by the struct.
+--- a/libbb/procps.c	2026-11-14 01:26:52.654137983 +0900
++++ b/libbb/procps.c	2026-11-14 01:26:52.671691427 +0900
+@@ -329,7 +329,8 @@
+ 		 * "continue": try next /proc/XXX
+ 		 */
+ 
+-		memset(&sp->vsz, 0, sizeof(*sp) - offsetof(procps_status_t, vsz));
++		memset((char *)sp + offsetof(procps_status_t, vsz), 0,
++		       sizeof(*sp) - offsetof(procps_status_t, vsz));
+ 
+ 		sp->pid = pid;
+ 		if (!(flags & ~PSSCAN_PID))
