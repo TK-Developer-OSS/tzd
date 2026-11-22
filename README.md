@@ -2,6 +2,8 @@
 
 **Yet Another D language**
 
+https://tk-developer-oss.github.io/tzd/
+
 Seeing the reports of vulnerabilities that keep multiplying today, and the countermeasures and real damage that follow from them, I could not bring myself to do nothing.
 
 Before ideals and identity, let us imagine the people who are suffering and being beaten down by this.
@@ -43,49 +45,6 @@ TzD is a C-compatible, GCC-based system programming language. It pays its respec
 ## Outlook
 
 As a next step I want to bring in hardware support.  As the first one, Intel MPX (Memory Protection Extensions), now discontinued, can be tried out (`-ftzd-mpx`).  First make everything fail safe, whatever the cost; then see how far it can be made fast, and widen the PoC to the level of CPU logic and IP.
-
-## Annotations
-
-TzD is strict by default: code it cannot prove safe is a compile error, not a
-silent pass. An annotation never turns a check off. It states a fact the C
-source does not carry — a size, an interface, how a value crosses the boundary
-to non-TzD code — so the checker has what it needs. A wrong annotation is
-caught (a type mismatch at compile time, or a run-time check), so it cannot
-open a hole. Each one applies only where it is written; a project collects its
-annotations in one header and force-includes it (see `tests/*/tzd-*.h`).
-
-Two annotations take an argument:
-
-- `__tzd_fncast(type, expr)` casts a type-erased function pointer (a generic
-  `void (*)(void)`, as a plugin/dispatch table holds) back to a typed one. On
-  storing the typed pointer, TzD records an interface id in the shadow; on the
-  cast, it checks the id against `type` and traps on a mismatch, then calls
-  through an ABI thunk. This is what lets OpenSSL's provider dispatch and
-  OpenSSH build as TzD without weakening the function-pointer rules.
-- `__tzd_size.<name>` gives the size of a symbol TzD cannot see the size of
-  (for example an array defined in assembly), so accesses through it are
-  bounded.
-
-The rest are `#pragma tzd <feature>`, each permitting exactly one construct,
-only in the file where it appears, and only in a form that is still checked:
-
-- `atomics` — accept `_Atomic` and the `__atomic_*` / `__sync_*` builtins; a
-  managed-pointer operand is bounds-checked, then the atomic runs on the raw
-  address.
-- `returns_twice` — accept a `returns_twice` declaration (the `setjmp` family).
-- `stack_reader <fn>...` — the named functions read the stack through a
-  read-only view (a kernel stack unwinder), instead of trapping on it.
-- `refuse_call <fn>...` — calling the named functions is a compile error (used
-  to forbid, say, thread creation in a single-threaded build).
-- `fnptr_holds` — a function pointer keeps the provenance it was given.
-- `align_member`, `whole_member`, `lazy_pointer` — how a pointer member of a
-  packed or host-shared struct is bounded (an aligned slot, a member that is
-  the whole struct, a pointer resolved on first use).
-- `managed_override` — treat a declaration as Managed C where the headers
-  would otherwise make it a host (native) function.
-
-A separate, still-unimplemented design for stating *who may write* a piece of
-memory is below.
 
 ## Design under discussion: who may write
 
