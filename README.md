@@ -111,6 +111,7 @@ This is a research environment. Do not treat it as proven safe.
 
 - **Do not use it in production.** Linux, OpenSSH, bash and the rest built with TzD are not meant for the public internet. The guest's root password is `tzd` by default, and ports are forwarded to 127.0.0.1 on the host only. Do not expose them.
 - **Nothing outside the bounds checks is protected.** TzD checks only code compiled by TzD. The host C library, the parts of libc2d written in plain C, the kernel's assembly, and places made exceptions by `#pragma tzd` are outside the checks. The exceptions are listed in `tests/*/tzd-*.h`.
+- **Internal pools are not seen through.** A program that carves its own pool out of one malloc'd block (PHP's emalloc, nginx and APR pools) looks like one object to TzD: an overflow from one part into the next is not seen unless the allocator states the parts (Apache 1.3's pool does, through a patch). See test case 26 in [CVE shapes](#cve-shapes-nine-cvss-98-vulnerabilities).
 - **Stopping is the normal outcome.** An out-of-range access, a use of freed memory, a read of heap memory never written, a double free or a write by a function that is not a writer of the memory stops the program (exit status 134). There is no continuing and no fallback.
 - **It is slow.** About 20x the GCC build on pointer-heavy code (as of 2026-11-17).
 - **It uses a lot of memory.** The guest starts with 2 GB, and the kernel's bounds table takes 512 MB. Addresses are never reused, so a long run uses up the virtual address space and the table and stops (a reboot fixes it).
