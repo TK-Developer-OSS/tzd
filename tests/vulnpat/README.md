@@ -26,7 +26,8 @@ The output protocol (`BEGIN` / `REACHED` / `EFFECT` / `END`) is described in
 
 A test case for a named CVE is published only when a proof of concept or
 a concrete method for that CVE is already public. 22, 23 and 25 are left
-out of the public tree for that reason; their rows stay in the table.
+out of the public tree for that reason: they exist and are run locally,
+and their rows stay in the table.
 The test cases contain no attack: each stops at showing the effect on
 data.
 

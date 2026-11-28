@@ -81,7 +81,7 @@ TzD's other checks all ask whether a pointer may touch the memory (out of bounds
 
 ## CVE shapes: nine CVSS 9.8 vulnerabilities
 
-> Status 2026-11-28. One test case per CVE: each reduces the CVE's faulty statement to a self-contained program of the same kind (the same check missing, the same arithmetic). They do not use the real Linux, OpenSSL or PHP, and the Linux ones run in user space, not in the kernel. The test cases are in [tests/vulnpat](tests/vulnpat), except 22, 23 and 25: a test case is published only for a CVE whose proof of concept or concrete method is already public.
+> Status 2026-11-28. One test case per CVE: each reduces the CVE's faulty statement to a self-contained program of the same kind (the same check missing, the same arithmetic). They do not use the real Linux, OpenSSL or PHP, and the Linux ones run in user space, not in the kernel. The test cases are in [tests/vulnpat](tests/vulnpat), except 22, 23 and 25, which exist and are run locally but are not published: a test case is published only for a CVE whose proof of concept or concrete method is already public.
 
 | # | Software | CVE | Shape of the flaw | GCC -O0 | TzD |
 |---|---|---|---|---|---|
