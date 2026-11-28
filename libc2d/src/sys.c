@@ -13,7 +13,7 @@ static long sys3(long n, long a, long b, long c)
 
 long tzd_sys_write(int fd, tzd_ptr buf, tzd_size_t n)
 {
-    return sys3(1, fd, (long) tzd_ptr_pointer(buf, n), (long) n);
+    return sys3(1, fd, (long) tzd_ptr_pointer_out(buf, n), (long) n);
 }
 
 void tzd_sys_exit(int status)

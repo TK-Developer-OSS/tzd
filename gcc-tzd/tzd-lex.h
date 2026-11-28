@@ -33,7 +33,29 @@ struct tzd_token {
   int strtype;
   /* TZD_CHAR: value as int (C rules for plain char literals).  */
   HOST_WIDE_INT cval;
+  /* A `// @tzd ...` annotation right before this token (task #79), or
+     NULL.  */
+  struct tzd_annot *annot;
 };
+
+/* An annotation comment, `// @tzd key=value ...` or the block form
+   (task #79, spec 1): ordinary compilers see a comment.  It applies to
+   the declaration that starts on the next line (only blank lines between
+   them); the parser takes it from that declaration's first token and sets
+   USED.  One that applies to nothing, and an unknown key, are errors.  */
+#define TZD_ANNOT_MAX 8
+struct tzd_annot {
+  location_t loc;
+  unsigned n;
+  const char *key[TZD_ANNOT_MAX];
+  const char *val[TZD_ANNOT_MAX];   /* NULL: a key without "=value" */
+  bool used;
+};
+/* libcpp's comment callback (set in tzd-opts.cc).  */
+extern void tzd_lex_comment (cpp_reader *, location_t, const unsigned char *,
+			     size_t);
+/* Errors for the annotations no declaration took (end of the unit).  */
+extern void tzd_annot_check_unused (void);
 
 /* Is the current translation unit TzD (.d) rather than Managed C (.c)?  */
 extern bool tzd_extensions_enabled;

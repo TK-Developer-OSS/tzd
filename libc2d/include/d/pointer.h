@@ -36,7 +36,25 @@ void  tzd_ptr_check(tzd_ptr p, tzd_size_t n);               /* trap if not      
 unsigned char tzd_ptr_load8(tzd_ptr p);
 void  tzd_ptr_store8(tzd_ptr p, unsigned char v);
 
-/* Native pointer to n checked bytes at p.  libd-internal use only.  */
+/* Native pointer to n checked bytes at p.  libd-internal use only.  The
+   bytes from p on count as written (code that is not checked gets them).  */
 void *tzd_ptr_pointer(tzd_ptr p, tzd_size_t n);
+/* The same for n bytes that leave the process (write(2)): they must have
+   been written.  */
+void *tzd_ptr_pointer_out(tzd_ptr p, tzd_size_t n);
+
+/* The heap map (task #8; libc2d stdlib.c): which 16-byte granules of the
+   heap belong to a live block and which were ever written.  */
+extern unsigned long tzd_hp_lo, tzd_hp_span;
+extern unsigned char *tzd_hp_map;
+void  tzd_hp_wrote(const void *p, tzd_size_t n);
+void  tzd_hp_read(const void *p, tzd_size_t n);
+void *tzd_hp_handout(void *addr, const void *base, tzd_size_t size);
+void  tzd_hp_copy(void *dst, const void *src, tzd_size_t n);
+int   tzd_hp_live(const void *p);
+
+/* Write groups (task #79; libc2d group.c): FN stores at ADDR, which lies
+   in section tzd_grp.  Traps unless FN is a writer of the object there.  */
+void  tzd_grp_store(const void *addr, const char *fn);
 
 #endif

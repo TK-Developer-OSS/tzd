@@ -16,18 +16,13 @@ size_t tzd_strlen(const char *s)
     return n;
 }
 
-/* memcpy.  Pointers inside the bytes keep their bounds.  */
+/* memcpy.  Pointers inside the bytes keep their bounds, and heap bytes
+   keep whether they were written (task #8): __tzd_copy checks both whole
+   ranges first (no partial write), then moves bytes, bounds entries and
+   written bits together.  */
 void *tzd_memcpy(void *dst, const void *src, size_t n)
 {
-    unsigned char *d = dst;
-    const unsigned char *s = src;
-    if (n) {                    /* whole range first: no partial write */
-        d = __tzd_narrow(d, n);
-        s = __tzd_narrow(s, n);
-    }
-    for (size_t i = 0; i < n; i++)
-        d[i] = s[i];
-    tzd_sh_copy(dst, src, n);
+    __tzd_copy(dst, src, n);
     return dst;
 }
 
@@ -90,20 +85,7 @@ int tzd_memcmp(const void *a, const void *b, size_t n)
 /* memmove: the copy direction handles overlap */
 void *tzd_memmove(void *dst, const void *src, size_t n)
 {
-    unsigned char *d = dst;
-    const unsigned char *s = src;
-    unsigned long da = (unsigned long) dst, sa = (unsigned long) src;
-    if (n) {
-        d = __tzd_narrow(d, n);
-        s = __tzd_narrow(s, n);
-    }
-    if (da <= sa || da >= sa + n)
-        for (size_t i = 0; i < n; i++)
-            d[i] = s[i];
-    else
-        for (size_t i = n; i > 0; i--)
-            d[i - 1] = s[i - 1];
-    tzd_sh_copy(dst, src, n);
+    __tzd_copy(dst, src, n);    /* overlap is handled like memmove */
     return dst;
 }
 

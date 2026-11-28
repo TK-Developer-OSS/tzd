@@ -46,14 +46,23 @@ TzD is a C-compatible, GCC-based system programming language. It pays its respec
 
 As a next step I want to bring in hardware support.  As the first one, Intel MPX (Memory Protection Extensions), now discontinued, can be tried out (`-ftzd-mpx`).  First make everything fail safe, whatever the cost; then see how far it can be made fast, and widen the PoC to the level of CPU logic and IP.
 
-## Design under discussion: who may write
+## Who may write
 
-> Status: under discussion, not implemented yet.
+> Status: partly implemented (user space, variables with static storage; 2026-11-28). Kernel mode and heap memory are still under design.
 
-TzD's current checks all ask whether a pointer may touch the memory (out of bounds, use after free, uninitialized). Some vulnerabilities write in-bounds, live, initialized memory from code that is not its rightful writer (for example CVE-2026-31431, "Copy Fail"); that is outside those checks. C source does not record who may write a piece of memory, so the compiler cannot guess it. The design adds a layer where a few annotations state it and the compiler enforces it.
+TzD's other checks all ask whether a pointer may touch the memory (out of bounds, use after free, uninitialized). Some vulnerabilities write in-bounds, live, initialized memory from code that is not its rightful writer (for example CVE-2026-31431, "Copy Fail"); that is outside those checks. C source does not record who may write a piece of memory, so the compiler cannot guess it. A few annotations state it and the compiler enforces it.
 
-- **Syntax**: annotations are comments, `// @tzd key=value ...` (`/* @tzd ... */` before an expression). Other compilers see plain comments. Annotations only add checks; an annotation with nothing to apply to, or an unknown key, is a compile error.
-- **Write groups**: memory belongs automatically to a group named after the function that allocated it; that function is its gate. Code outside it may write only with an explicit `// @tzd set=allow group=<name>`. A pointer whose group cannot be traced is a compile error, like a missing prototype. Helpers such as memcpy are marked `// @tzd delegate` and write with their caller's permission. On free, the memory moves to the allocator's group, so the allocator needs no all-groups privilege. `mode=strict` is the default; `mode=free` explicitly lets anyone write.
+- **Syntax** (implemented): annotations are comments, `// @tzd key=value ...`, right before the declaration they apply to. Other compilers see plain comments. Annotations only add checks; an annotation with nothing to apply to, or an unknown key, is a compile error.
+- **Write groups** (implemented in user space): the declaration of the shared memory names its group and its writers.
+
+  ```c
+  // @tzd group=filecache writer=cache_fill,cache_update
+  static struct page cached;
+  ```
+
+  Pointers to it are passed and read as in plain C. A store through a pointer by a function that is not listed stops the program, also when the function is reached through a pointer handed out long before; a library function such as memcpy writes with its caller's permission and is checked with the caller's name. A store that names the variable in a function that is not listed is a compile error. Memory without a group is not affected.
+- **Kernel mode** (decided, not implemented): kernel mode is the strict mode for code with the freedom of bare metal. Handing memory to another part of the kernel needs a group annotation, and a missing one is a build error; an address whose group is unclear belongs to the local group of the code that declared it, and passing it out of that scope is an error. Code that uses real addresses (an integer made a pointer) compiles only in kernel mode.
+- **Scope**: TzD closes the holes that C itself leaves open (bounds, lifetime, initialization, type confusion, the writer of shared memory, real addresses). Logic bugs, such as a wrong permission check, are outside it for now.
 - **Typed void pointers**: the annotation lists the role of each pointer level from the outside in; the count must match the declaration. A `void *` member of a struct needs such an annotation. Storing a typed pointer into a `void *` records a type id that is checked when it is cast back (the mechanism already used for function pointers).
 
   ```c
@@ -73,13 +82,27 @@ This is a research environment. Do not treat it as proven safe.
 
 - **Do not use it in production.** Linux, OpenSSH, bash and the rest built with TzD are not meant for the public internet. The guest's root password is `tzd` by default, and ports are forwarded to 127.0.0.1 on the host only. Do not expose them.
 - **Nothing outside the bounds checks is protected.** TzD checks only code compiled by TzD. The host C library, the parts of libc2d written in plain C, the kernel's assembly, and places made exceptions by `#pragma tzd` are outside the checks. The exceptions are listed in `tests/*/tzd-*.h`.
-- **Stopping is the normal outcome.** An out-of-range access, a use of freed memory or a double free stops the program (exit status 134). There is no continuing and no fallback.
+- **Stopping is the normal outcome.** An out-of-range access, a use of freed memory, a read of heap memory never written, a double free or a write by a function that is not a writer of the memory stops the program (exit status 134). There is no continuing and no fallback.
 - **It is slow.** About 20x the GCC build on pointer-heavy code (as of 2026-11-17).
 - **It uses a lot of memory.** The guest starts with 2 GB, and the kernel's bounds table takes 512 MB. Addresses are never reused, so a long run uses up the virtual address space and the table and stops (a reboot fixes it).
 - **Experimental:** `-ftzd-mpx` (checks with Intel MPX instructions) runs only on CPUs with MPX (Skylake to Comet Lake) and is not measured on real hardware. On a CPU without MPX the program stops at start-up.
 - **SMP:** the kernel builds and boots on one or two CPUs. The kernel's bounds table has no locking for concurrent access from several CPUs yet.
 - **Not supported:** stack traces of other tasks.
 - **Work in progress:** see `STATUS.md` for the design and the state. It changes often.
+
+## Changelog
+
+### 2026-11-28
+
+- **Use after free and unwritten heap memory** (heap map): the heap is one region with two bits per 16-byte granule, whether it belongs to a live block and whether it was ever written. Reading or writing a freed block now stops the program (before, it ran on or crashed); reading heap memory that was never written stops it. memcpy, realloc and struct copies carry the bits instead of reading. Gap: the written bit is per granule, so an unwritten field that shares 16 bytes with a written one is not seen.
+- **Pointers to ended locals**: a pointer to a local variable that is stored in memory is marked when the local's block ends, and its next load stops the program. Gap: such a pointer kept only in a register or in a local whose address is never taken is not seen.
+- **Real addresses only in kernel mode**: outside `-ftzd-kernel`, converting an integer to an object pointer is a compile error. All-ones sentinels (`MAP_FAILED`), integers carried in a `void *` (thread arguments; any access through one still stops) and `sizeof`/`typeof` operands are allowed.
+- **`// @tzd` annotations and write groups** (user space): see [Who may write](#who-may-write).
+- **Tests**: `tests/managed` 193 of 195 pass (the two failures predate these changes); in the Juliet subset run by `tests/juliet/run.sh` no correct ("good") program is stopped, the use-after-free cases (CWE-416) are now all stopped by TzD, and more cases are stopped for CWE-457 (3 to 9), CWE-126 (10 to 14) and CWE-124 (16 to 17).
+
+### 2026-11-22
+
+- First public snapshot: cc1tzd (GCC 14.4 front end), libc2d, the TzD builds of Apache 1.3, bash, coreutils, BusyBox, OpenSSH, OpenSSL and the Linux kernel, and the QEMU image in the releases.
 
 ## License
 

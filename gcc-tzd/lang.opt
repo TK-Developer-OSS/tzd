@@ -8,6 +8,10 @@ ftzd-kernel
 Common Var(flag_tzd_kernel) Init(0)
 Kernel mode (task #42): a managed pointer made from a raw address (an integer, an asm output, a native function) gets its bounds from the runtime's tzd_from_native, which looks up the memory region.
 
+ftzd-delegate-unit
+Common Var(flag_tzd_delegate_unit) Init(0)
+Library code (libc2d's Managed C parts, task #79): the unit's functions write with their callers' permission, so their own stores are not tested against write groups; their callers test the pointer arguments.  Such a unit cannot declare a write group.
+
 ftzd-mpx
 Common Var(flag_tzd_mpx) Init(0)
 Experimental: check pointer bounds with Intel MPX instructions (bndmk, bndcl, bndcu; Skylake to Comet Lake) instead of compare and branch.  User programs only; the program stops at start-up when the CPU or the OS does not provide MPX.

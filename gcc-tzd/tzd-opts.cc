@@ -1221,6 +1221,7 @@ c_common_post_options (const char **pfilename)
   struct cpp_callbacks *cb = cpp_get_callbacks (parse_in);
   cb->file_change = cb_file_change;
   cb->dir_change = cb_dir_change;
+  cb->comment = tzd_lex_comment;   /* `// @tzd` annotations (task #79) */
   if (lang_hooks.preprocess_options)
     lang_hooks.preprocess_options (parse_in);
   cpp_post_options (parse_in);

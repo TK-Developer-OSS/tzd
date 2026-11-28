@@ -33,6 +33,11 @@ typedef struct tzd_sh_ent {
     tzd_size_t live;     /* 1: entry valid (reserved for the #8 key later) */
 } tzd_sh_ent;
 
+/* An entry whose object ended while the slot still pointed at it (block
+   exit of a local, see esc_release): live 0, base 0, this size, addr the
+   value.  Loading the slot traps with its own message.  */
+#define SH_DANGLING ((tzd_size_t) 0xdead10ca1UL)
+
 static tzd_sh_ent **sh_pri;
 
 void tzd_trap_slot(const char *msg, const void *slot, const void *value)
@@ -197,8 +202,16 @@ tzd_ptr tzd_sh_load(const void *slot)
         p.size = e->size;
         return p;
     }
-    if (v == 0)
+    if (e && !e->live && e->size == SH_DANGLING && e->addr == v && v)
+        tzd_trap_slot("tzd: pointer in memory points to a local whose block has "
+                      "ended (CWE-562)\n", slot, v);
+    if (v == 0) {
+        /* A null slot of a heap block is a null pointer only when the
+           program wrote it; fresh heap bytes are zero but hold no value
+           (task #8, CWE-908).  */
+        tzd_hp_read(slot, 8);
         return tzd_ptr_null();
+    }
     if (e && e->live)
         tzd_trap_slot("tzd: pointer in memory was overwritten by a non-pointer store\n",
                       slot, v);
@@ -231,10 +244,197 @@ tzd_ptr tzd_sh_load_lazy(const void *slot)
     return p;
 }
 
+/* Pointers to stack objects kept in memory (task #8, CWE-562).
+
+   A pointer to a local can be stored in a slot that outlives the local:
+   `*out = buf` in a helper, a global, a heap struct.  The local's block
+   ends, its bytes are wiped and its own slots dropped, but the slot that
+   points at it still holds an entry with the local's bounds, and the next
+   frame at that address would be read through it.  So every slot that
+   receives a pointer whose object is not heap or static memory is noted
+   here (slot -> object base), and a release that covers such an object
+   (tzd_sh_wipe: block exit, and any other wipe) turns the entry of each
+   noted slot still pointing at it into a "dangling" mark.  A load of that
+   slot traps.  The table holds exactly the live entries of that kind: a
+   store of another value or a clear of the slot takes it out, so its size
+   is bounded by the slots that hold such pointers right now.  Stack
+   addresses are reused, unlike heap addresses, which is why the heap map
+   cannot be used for this.  Not covered: a pointer to a local kept only
+   in a register or a local variable whose address is never taken.  */
+#define ESC_EMPTY 0UL
+#define ESC_GONE  1UL                   /* never a slot: slots are 8-aligned */
+typedef struct { unsigned long slot, base, size; } sh_esc;
+static sh_esc *esc_tab;
+static tzd_size_t esc_cap, esc_n, esc_gone;
+static unsigned long esc_lo = ~0UL, esc_hi;   /* covers every noted object */
+static volatile int esc_lock;
+extern char __executable_start[] __attribute__((weak));
+extern char _end[] __attribute__((weak));
+
+static void esc_enter(void)
+{
+    while (__atomic_exchange_n(&esc_lock, 1, __ATOMIC_ACQUIRE))
+        __builtin_ia32_pause();
+}
+static void esc_leave(void)
+{
+    __atomic_store_n(&esc_lock, 0, __ATOMIC_RELEASE);
+}
+
+/* An object that a release can end while a pointer to it is kept: not the
+   heap (its addresses are never reused; the heap map covers it), not the
+   program image (static objects never end), not host memory.  */
+static int esc_kind(tzd_ptr v)
+{
+    unsigned long b = (unsigned long) v.base;
+    if (!b || v.size == (tzd_size_t) (~(tzd_size_t) 0 >> 1))
+        return 0;
+    if (b - tzd_hp_lo < tzd_hp_span)
+        return 0;
+    if (__executable_start && _end
+        && b >= (unsigned long) __executable_start && b < (unsigned long) _end)
+        return 0;
+    return 1;
+}
+
+static tzd_size_t esc_hash(unsigned long slot, tzd_size_t cap)
+{
+    return (tzd_size_t) ((slot >> 3) * 0x9E3779B97F4A7C15UL) & (cap - 1);
+}
+
+static void esc_put_locked(unsigned long slot, unsigned long base,
+                           tzd_size_t size);
+
+static void esc_grow(void)
+{
+    sh_esc *old = esc_tab;
+    tzd_size_t oldcap = esc_cap, i, cap = esc_cap ? esc_cap : 256;
+    while ((esc_n + 1) * 2 > cap)
+        cap *= 2;
+    if (cap == esc_cap && esc_gone == 0)
+        cap *= 2;
+    esc_tab = (sh_esc *) tzd_sys_mmap(cap * sizeof *esc_tab);
+    if (!esc_tab)
+        sh_fail("libc2d: out of memory for the table of kept stack pointers\n");
+    esc_cap = cap;
+    esc_n = esc_gone = 0;
+    for (i = 0; i < oldcap; i++)
+        if (old[i].slot > ESC_GONE)
+            esc_put_locked(old[i].slot, old[i].base, old[i].size);
+    if (old)
+        tzd_sys_munmap(old, oldcap * sizeof *old);
+}
+
+static void esc_put_locked(unsigned long slot, unsigned long base,
+                           tzd_size_t size)
+{
+    tzd_size_t i, gone = (tzd_size_t) -1;
+    if ((esc_n + esc_gone + 1) * 2 > esc_cap)
+        esc_grow();
+    for (i = esc_hash(slot, esc_cap); esc_tab[i].slot != ESC_EMPTY;
+         i = (i + 1) & (esc_cap - 1)) {
+        if (esc_tab[i].slot == slot) {
+            esc_tab[i].base = base;
+            esc_tab[i].size = size;
+            goto bounds;
+        }
+        if (esc_tab[i].slot == ESC_GONE && gone == (tzd_size_t) -1)
+            gone = i;
+    }
+    if (gone != (tzd_size_t) -1) {
+        i = gone;
+        esc_gone--;
+    }
+    esc_tab[i].slot = slot;
+    esc_tab[i].base = base;
+    esc_tab[i].size = size;
+    esc_n++;
+bounds:
+    if (base < esc_lo)
+        esc_lo = base;
+    if (base + size > esc_hi)
+        esc_hi = base + size;
+}
+
+static void esc_del_locked(unsigned long slot)
+{
+    tzd_size_t i;
+    for (i = esc_hash(slot, esc_cap); esc_tab[i].slot != ESC_EMPTY;
+         i = (i + 1) & (esc_cap - 1))
+        if (esc_tab[i].slot == slot) {
+            esc_tab[i].slot = ESC_GONE;
+            esc_n--;
+            esc_gone++;
+            return;
+        }
+}
+
+/* SLOT now holds V (or nothing): note it, or take it out.  */
+static void esc_note(const void *slot, tzd_ptr v)
+{
+    int kind = v.addr || v.base ? esc_kind(v) : 0;
+    if (!kind && !esc_n)
+        return;
+    esc_enter();
+    if (kind)
+        esc_put_locked((unsigned long) slot, (unsigned long) v.base, v.size);
+    else
+        esc_del_locked((unsigned long) slot);
+    esc_leave();
+}
+
+/* [p, p+n) is released: every noted slot whose object lies in it gets the
+   dangling mark (if its entry still points there), and leaves the table.  */
+static void esc_release(tzd_size_t p, tzd_size_t n)
+{
+    tzd_size_t i;
+    unsigned long lo = ~0UL, hi = 0;
+    if (!esc_n || p >= esc_hi || p + n <= esc_lo)
+        return;
+    esc_enter();
+    for (i = 0; i < esc_cap; i++) {
+        sh_esc *x = &esc_tab[i];
+        tzd_sh_ent *e;
+        if (x->slot <= ESC_GONE)
+            continue;
+        if (x->base < p || x->base >= p + n) {
+            if (x->base < lo)
+                lo = x->base;
+            if (x->base + x->size > hi)
+                hi = x->base + x->size;
+            continue;
+        }
+        e = sh_find((void *) x->slot);
+        if (e && e->live == 1 && (unsigned long) e->base == x->base) {
+            e->live = 0;
+            e->base = 0;
+            e->size = SH_DANGLING;      /* e->addr keeps the value */
+        }
+        x->slot = ESC_GONE;
+        esc_n--;
+        esc_gone++;
+    }
+    esc_lo = lo;
+    esc_hi = hi;
+    esc_leave();
+}
+
+/* A copy gave SLOT the entry SE (tzd_sh_copy).  */
+static void sh_copied(void *slot, const tzd_sh_ent *se)
+{
+    tzd_ptr v;
+    v.addr = se->addr;
+    v.base = se->base;
+    v.size = se->size;
+    if (se->live == 1 || esc_n)
+        esc_note(slot, se->live == 1 ? v : tzd_ptr_null());
+}
+
 /* Record v as the bounds of slot, which already holds v.addr.  */
 static void sh_record(const void *slot, tzd_ptr v)
 {
     tzd_sh_ent *e;
+    esc_note(slot, v);
     if (v.addr == 0 && v.base == 0) {
         e = sh_find(slot);
         if (e)
@@ -256,6 +456,7 @@ void tzd_sh_store(void *slot, tzd_ptr v)
     sh_index_check(slot);
     *(char **) slot = v.addr;
     sh_record(slot, v);
+    tzd_hp_wrote(slot, 8);
 }
 
 /* The slot already holds the value (static data, possibly read-only after
@@ -265,6 +466,7 @@ void tzd_sh_record(const void *slot, tzd_ptr v)
     if ((tzd_size_t) slot & 7)
         return;      /* packed host field: no entry, its loads use the rule */
     sh_record(slot, v);
+    tzd_hp_wrote(slot, 8);
 }
 
 /* Forget every slot entirely inside [p, p+n) and every slot overlapping it:
@@ -304,6 +506,8 @@ void tzd_sh_clear(void *p, tzd_size_t n)
                 unsigned b = (unsigned) __builtin_ctzl(w);
                 w &= w - 1;
                 e[b - lo].live = 0;
+                if (esc_n)
+                    esc_note((void *) ((i - lo + b) << 3), tzd_ptr_null());
             }
             e += hi - lo + 1;
             a = ((i | 63) + 1) << 3;
@@ -324,7 +528,26 @@ void tzd_sh_clear(void *p, tzd_size_t n)
 #define SH_WIPE_BYTE 0xa5
 #define SH_WIPE_WORD 0xa5a5a5a5a5a5a5a5UL
 
+static void sh_wipe_bytes(void *p, tzd_size_t n);
+
 void tzd_sh_wipe_data(void *p, tzd_size_t n)
+{
+    /* Memory that holds no pointer can still be pointed at: the slots
+       kept pointing in here get the dangling mark (task #8).  */
+    esc_release((tzd_size_t) p, n);
+    sh_wipe_bytes(p, n);
+}
+
+/* __tzd_wipe in user space (an allocator recycling memory it keeps, task
+   #3): the bytes are destroyed and the bounds entries inside dropped, but
+   the storage does not end, so pointers kept to it are not marked.  */
+void tzd_wipe_range(void *p, tzd_size_t n)
+{
+    sh_wipe_bytes(p, n);
+    tzd_sh_clear(p, n);
+}
+
+static void sh_wipe_bytes(void *p, tzd_size_t n)
 {
     unsigned char *b = (unsigned char *) p;
     tzd_size_t i = 0;
@@ -339,7 +562,7 @@ void tzd_sh_wipe_data(void *p, tzd_size_t n)
 
 void tzd_sh_wipe(void *p, tzd_size_t n)
 {
-    tzd_sh_wipe_data(p, n);
+    tzd_sh_wipe_data(p, n);             /* also marks slots pointing here */
     tzd_sh_clear(p, n);
 }
 
@@ -350,6 +573,9 @@ void tzd_sh_wipe(void *p, tzd_size_t n)
 void tzd_sh_copy(void *dst, const void *src, tzd_size_t n)
 {
     tzd_size_t d = (tzd_size_t) dst, s = (tzd_size_t) src, i;
+    /* Which heap granules hold written bytes moves with the bytes too
+       (task #8), whether or not any slot is involved.  */
+    tzd_hp_copy(dst, src, n);
     if (!sh_pri || n == 0 || d == s)
         return;
     /* Neither side has an entry on any of its pages (the usual copy of
@@ -374,21 +600,48 @@ void tzd_sh_copy(void *dst, const void *src, tzd_size_t n)
         if (d < s) {
             for (i = 0; i < cnt; i++) {
                 tzd_sh_ent *se = sh_find((void *) (s + i * 8));
-                if (se && se->live)
+                if (se && se->live) {
                     *sh_get((void *) (d + i * 8)) = *se;
+                    sh_copied((void *) (d + i * 8), se);
+                }
                 else
                     tzd_sh_clear((void *) (d + i * 8), 8);
             }
         } else {
             for (i = cnt; i > 0; i--) {
                 tzd_sh_ent *se = sh_find((void *) (s + (i - 1) * 8));
-                if (se && se->live)
+                if (se && se->live) {
                     *sh_get((void *) (d + (i - 1) * 8)) = *se;
+                    sh_copied((void *) (d + (i - 1) * 8), se);
+                }
                 else
                     tzd_sh_clear((void *) (d + (i - 1) * 8), 8);
             }
         }
     }
+}
+
+/* __tzd_copy (cc1tzd; memcpy and memmove): N bytes from SRC to DST, both
+   ranges already checked by the caller (bounds, and that the heap blocks
+   are live).  The bytes move like memmove, the slots' bounds entries and
+   the heap map's written bits move with them.  Copying is not reading:
+   bytes that were never written stay "never written" at the destination
+   instead of trapping here (a struct with padding, the unused tail of a
+   buffer).  Kept a plain loop: GCC must not turn it into a memmove call
+   (there is no other memmove under libc2d).  */
+__attribute__((optimize("no-tree-loop-distribute-patterns")))
+void tzd_copy_bytes(void *dst, const void *src, tzd_size_t n)
+{
+    unsigned char *d = (unsigned char *) dst;
+    const unsigned char *s = (const unsigned char *) src;
+    tzd_size_t i;
+    if (d <= s || d >= s + n)
+        for (i = 0; i < n; i++)
+            d[i] = s[i];
+    else
+        for (i = n; i > 0; i--)
+            d[i - 1] = s[i - 1];
+    tzd_sh_copy(dst, src, n);
 }
 
 /* Static initializers: every unit's `tzd_shinit` table lists
@@ -431,6 +684,7 @@ void tzd_sh_record_typed(void *slot, tzd_ptr v, tzd_size_t id)
 {
     tzd_sh_ent *e;
     sh_index_check(slot);
+    tzd_hp_wrote(slot, 8);          /* the caller stored the 8 bytes */
     if (v.addr == 0) {
         e = sh_find(slot);
         if (e)

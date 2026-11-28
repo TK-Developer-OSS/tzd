@@ -4,11 +4,11 @@ CC      = $(GCCDIR)/xgcc -B$(GCCDIR)/
 CFLAGS  = -O2 -Wall -Wextra -Iinclude -nostdinc -ffreestanding -fno-stack-protector -fno-omit-frame-pointer
 # Hand-lowered C: the runtime the checks are built on (bounds table, wipe,
 # trap, allocator core, syscalls, start-up, host boundary).
-OBJS    = build/sys.o build/pointer.o build/stdio.o build/stdlib.o build/start.o build/main.o build/boundary.o build/shadow.o build/hostrule.o build/regs.o build/hostalloc.o build/fnabi.o build/mpx.o
+OBJS    = build/sys.o build/pointer.o build/stdio.o build/stdlib.o build/start.o build/main.o build/boundary.o build/shadow.o build/hostrule.o build/regs.o build/hostalloc.o build/fnabi.o build/mpx.o build/group.o
 # Managed C compiled by cc1tzd (libc2d/tzd/): the ISO C library parts.  The
 # share written in TzD grows until libc2d becomes libd (task #43).
 TZD     = ../bin/tzd
-TZDFLAGS = --host -O2 -nostdinc -isystem tzd/sys -fno-builtin -fno-tree-loop-distribute-patterns -fno-stack-protector
+TZDFLAGS = --host -ftzd-delegate-unit -O2 -nostdinc -isystem tzd/sys -fno-builtin -fno-tree-loop-distribute-patterns -fno-stack-protector
 TZDOBJS = build/tzd_string.o build/tzd_ctype.o build/tzd_stdlib.o build/tzd_strtol.o build/tzd_qsort.o build/tzd_printf.o
 
 all: build/libc2d.a build/crt0.o

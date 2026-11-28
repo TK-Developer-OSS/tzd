@@ -321,6 +321,238 @@ member_pragma (cpp_reader *pfile, location_t loc, bool align, bool whole)
   cnt++;
 }
 
+/* ------------------------------------------------------------------ */
+/* `// @tzd` annotations (task #79, spec 1).  libcpp calls tzd_lex_comment
+   for every comment it lexes -- also in directives and in skipped #if
+   blocks -- so an annotation is only taken when the source between its
+   end and the next token the parser gets is blank (no directive, no
+   other text): it then precedes that token directly.  The source is
+   read in libcpp's buffer, only while that buffer is still the current
+   one.  */
+
+struct pending_annot {
+  tzd_annot *a;
+  cpp_buffer *buf;
+  const char *file;
+  int line;                    /* of the comment's end */
+  const unsigned char *end;    /* just after the comment */
+};
+static vec<pending_annot> pending_annots;
+static vec<tzd_annot *> all_annots;
+
+/* Is the line holding TEXT (at column COL of line LINE) part of a
+   preprocessor directive: its first non-blank character, or that of a
+   line it continues with a backslash, is '#'?  */
+static bool
+directive_line_p (const unsigned char *text, int line, int col)
+{
+  const unsigned char *ls = text - (col - 1);
+  for (;;)
+    {
+      for (const unsigned char *q = ls; q < text; q++)
+	if (*q != ' ' && *q != '\t' && *q != '\f' && *q != '\v')
+	  {
+	    if (*q == '#')
+	      return true;
+	    break;
+	  }
+      /* Continued from the line before?  Only when that line is not the
+	 first (its start is then after a newline we can find).  */
+      if (line <= 2 || ls[-1] != '\n')
+	return false;
+      const unsigned char *pe = ls - 1;   /* the newline */
+      if (pe[-1] == '\r')
+	pe--;
+      if (pe[-1] != '\\')
+	return false;
+      const unsigned char *q = pe - 1;
+      while (q[-1] != '\n')
+	q--;
+      text = ls = q;
+      line--;
+      /* The whole previous line is checked from its start.  */
+      for (const unsigned char *r = ls; r < pe - 1; r++)
+	if (*r != ' ' && *r != '\t' && *r != '\f' && *r != '\v')
+	  {
+	    if (*r == '#')
+	      return true;
+	    break;
+	  }
+    }
+}
+
+void
+tzd_lex_comment (cpp_reader *pfile, location_t loc, const unsigned char *text,
+		 size_t len)
+{
+  if (len < 2 || text[0] != '/')
+    return;
+  bool block = text[1] == '*';
+  const unsigned char *p = text + 2, *e = text + len;
+  if (block && len >= 4)
+    e -= 2;
+  while (p < e && (*p == ' ' || *p == '\t'))
+    p++;
+  if (e - p < 4 || memcmp (p, "@tzd", 4) != 0
+      || (p + 4 < e && !ISSPACE (p[4])))
+    return;
+  p += 4;
+  expanded_location xl = expand_location (loc);
+  if (!xl.file || xl.column <= 0)
+    {
+      error_at (loc, "%<@tzd%> annotation where its place cannot be told "
+		"(task #79)");
+      return;
+    }
+  if (directive_line_p (text, xl.line, xl.column))
+    {
+      error_at (loc, "%<@tzd%> annotation inside a preprocessor directive "
+		"(task #79)");
+      return;
+    }
+  if (!tzd_lex_obstack_ready)
+    {
+      gcc_obstack_init (&tzd_lex_obstack);
+      tzd_lex_obstack_ready = true;
+    }
+  tzd_annot *a = XOBNEW (&tzd_lex_obstack, tzd_annot);
+  memset (a, 0, sizeof *a);
+  a->loc = loc;
+  for (;;)
+    {
+      while (p < e && ISSPACE (*p))
+	p++;
+      if (p >= e)
+	break;
+      const unsigned char *ks = p;
+      while (p < e && (ISALNUM (*p) || *p == '_'))
+	p++;
+      const unsigned char *ke = p;
+      const unsigned char *vs = NULL, *ve = NULL;
+      if (p < e && *p == '=')
+	{
+	  vs = ++p;
+	  while (p < e && !ISSPACE (*p))
+	    p++;
+	  ve = p;
+	}
+      if (ks == ke || (vs && vs == ve) || (p < e && !ISSPACE (*p)))
+	{
+	  error_at (loc, "malformed %<@tzd%> annotation: write "
+		    "%<key=value%> words (task #79)");
+	  a->used = true;
+	  return;
+	}
+      if (a->n == TZD_ANNOT_MAX)
+	{
+	  error_at (loc, "too many keys in one %<@tzd%> annotation");
+	  a->used = true;
+	  return;
+	}
+      a->key[a->n] = (const char *) obstack_copy0 (&tzd_lex_obstack, ks,
+						   ke - ks);
+      a->val[a->n] = vs ? (const char *) obstack_copy0 (&tzd_lex_obstack, vs,
+							ve - vs) : NULL;
+      a->n++;
+    }
+  if (a->n == 0)
+    {
+      error_at (loc, "empty %<@tzd%> annotation");
+      return;
+    }
+  int end_line = xl.line;
+  for (const unsigned char *q = text; q < text + len; q++)
+    if (*q == '\n')
+      end_line++;
+  pending_annot pa = { a, cpp_get_buffer (pfile), xl.file, end_line,
+		       text + len };
+  pending_annots.safe_push (pa);
+  all_annots.safe_push (a);
+}
+
+/* Attach the pending annotations to token T (at LOC) just produced.  */
+static void
+attach_annots (cpp_reader *pfile, const cpp_token *t, location_t loc,
+	       struct tzd_token *tok)
+{
+  location_t xp = linemap_resolve_location (line_table, loc,
+					    LRK_MACRO_EXPANSION_POINT, NULL);
+  expanded_location tl = expand_location (xp);
+  for (unsigned i = 0; i < pending_annots.length (); i++)
+    {
+      pending_annot &pa = pending_annots[i];
+      bool ok = t->type != CPP_EOF && tl.file && tl.column > 0
+		&& strcmp (tl.file, pa.file) == 0
+		&& cpp_get_buffer (pfile) == pa.buf
+		&& tl.line >= pa.line;
+      if (ok)
+	{
+	  /* Blank up to the token: newlines, spaces and tabs only.  */
+	  const unsigned char *q = pa.end;
+	  int line = pa.line;
+	  const unsigned char *ls = NULL;
+	  while (ok)
+	    {
+	      if (line == tl.line)
+		{
+		  if (!ls)
+		    {
+		      /* Same line as the comment's end: the token's column
+			 is after it.  */
+		      ls = q;
+		      while (ls[-1] != '\n' && line > 1)
+			ls--;
+		      if (line == 1)
+			{
+			  ok = false;
+			  break;
+			}
+		    }
+		  if (q >= ls + (tl.column - 1))
+		    break;
+		}
+	      unsigned char c = *q;
+	      if (c == '\n')
+		{
+		  line++;
+		  ls = q + 1;
+		}
+	      else if (c != ' ' && c != '\t' && c != '\r' && c != '\f'
+		       && c != '\v')
+		ok = false;
+	      q++;
+	    }
+	  ok = ok && q == ls + (tl.column - 1);
+	}
+      if (!ok)
+	{
+	  error_at (pa.a->loc, "a %<@tzd%> annotation must come right before "
+		    "the declaration it applies to (task #79)");
+	  pa.a->used = true;
+	  continue;
+	}
+      if (tok->annot)
+	{
+	  error_at (pa.a->loc, "two %<@tzd%> annotations for one declaration: "
+		    "write the keys in one");
+	  pa.a->used = true;
+	  continue;
+	}
+      tok->annot = pa.a;
+    }
+  pending_annots.truncate (0);
+}
+
+void
+tzd_annot_check_unused (void)
+{
+  for (tzd_annot *a : all_annots)
+    if (!a->used)
+      error_at (a->loc, "this %<@tzd%> annotation applies to nothing "
+		"(task #79)");
+  all_annots.truncate (0);
+}
+
 void
 tzd_lex_next (cpp_reader *pfile, struct tzd_token *tok)
 {
@@ -382,6 +614,9 @@ tzd_lex_next (cpp_reader *pfile, struct tzd_token *tok)
     }
 
   tok->loc = vloc != UNKNOWN_LOCATION ? vloc : t->src_loc;
+  tok->annot = NULL;
+  if (pending_annots.length ())
+    attach_annots (pfile, t, tok->loc, tok);
   tok->text = "";
   tok->str = NULL;
   tok->len = 0;

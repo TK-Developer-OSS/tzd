@@ -107,7 +107,174 @@ static struct sl_arena {
     unsigned long pend_lo, pend_hi; /* dead runs [lo, hi) not yet retired */
 } sl_arena[SL_NCLASS];
 
-static void sl_init(struct sl_arena *a, unsigned long size)
+/* The heap region (task #8, TK 2026-11-28): every block malloc hands out
+   lies in one reservation, the slot arenas of the size classes first, the
+   large-block arena after them.  One range test then tells whether an
+   address is heap memory, and the heap map below says, for each 16-byte
+   granule of the region, whether it belongs to a live block and whether
+   it was ever written.  cc1tzd reads the map inline at every access
+   (build_check, rvalue, the stores), the runtime here keeps it.
+   Every block starts 16-aligned and every size class is a multiple of 16,
+   so a granule never belongs to two blocks: "live" is exact.  "Written"
+   is per granule: a read of the unwritten bytes of a granule that was
+   partly written is not seen.  */
+#define HP_CLASSES 0UL                      /* slot arenas: 14 * 2^38 */
+#define HP_BIG (1UL << 42)                  /* the large-block arena */
+#define HP_SPAN (1UL << 43)
+unsigned long tzd_hp_lo, tzd_hp_span;
+unsigned char *tzd_hp_map;                  /* 2 bits per granule */
+
+static void hp_init(void)
+{
+    unsigned long lo;
+    unsigned char *map;
+    if (tzd_hp_lo)
+        return;
+    lo = (unsigned long) tzd_sys_mmap_at(0, HP_SPAN, 0 /* PROT_NONE */, 0x4000);
+    map = (unsigned char *) tzd_sys_mmap_noreserve(HP_SPAN / 64);
+    if (!lo || !map)
+        tzd_trap("libc2d: out of address space for the heap\n");
+    tzd_hp_map = map;
+    tzd_hp_lo = lo;
+    __atomic_store_n(&tzd_hp_span, HP_SPAN, __ATOMIC_RELEASE);
+}
+
+/* Granule G of the region is bits 2*(G%4) (live) and 2*(G%4)+1 (written)
+   of map byte G/4.  PAT is 1 (live), 2 (written) or 3 (both).  Bytes
+   shared with a neighbouring block are changed atomically (another thread
+   may be marking a write into the neighbour); bytes wholly inside the
+   block belong to nobody else while it is being created or destroyed.  */
+static void hp_fill(unsigned long a, unsigned long n, unsigned pat, int set)
+{
+    unsigned long g = (a - tzd_hp_lo) >> 4;
+    unsigned long e = (a - tzd_hp_lo + n + 15) >> 4;
+    unsigned char whole = (unsigned char) (set ? pat * 0x55 : 0);
+    while (g < e) {
+        if ((g & 3) == 0 && e - g >= 4) {
+            tzd_hp_map[g / 4] = whole;
+            g += 4;
+            continue;
+        }
+        if (set)
+            __atomic_fetch_or(&tzd_hp_map[g / 4],
+                              (unsigned char) (pat << ((g & 3) * 2)),
+                              __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_and(&tzd_hp_map[g / 4],
+                               (unsigned char) ~(3U << ((g & 3) * 2)),
+                               __ATOMIC_RELAXED);
+        g++;
+    }
+}
+
+static int hp_in(unsigned long a)
+{
+    return a - tzd_hp_lo < tzd_hp_span;
+}
+
+static unsigned hp_bits(unsigned long a)
+{
+    unsigned long g = (a - tzd_hp_lo) >> 4;
+    return (tzd_hp_map[g / 4] >> ((g & 3) * 2)) & 3;
+}
+
+/* The block holding A, for a trap message: a slot's start and class size,
+   or for the large-block arena the granule itself.  */
+static void hp_block(unsigned long a, unsigned long *base, unsigned long *size)
+{
+    unsigned long off = a - tzd_hp_lo;
+    if (off < SL_NCLASS * SL_ARENA) {
+        unsigned long c = off / SL_ARENA, in = off % SL_ARENA;
+        *size = sl_size[c];
+        *base = tzd_hp_lo + c * SL_ARENA + in / *size * *size;
+    } else {
+        *base = a & ~15UL;
+        *size = 16;
+    }
+}
+
+/* A store wrote [p, p + n): its granules are written.  Outside the heap,
+   nothing to do.  */
+void tzd_hp_wrote(const void *p, tzd_size_t n)
+{
+    unsigned long a = (unsigned long) p, g, e;
+    if (!n || !hp_in(a))
+        return;
+    g = (a - tzd_hp_lo) >> 4;
+    e = (a - tzd_hp_lo + n + 15) >> 4;
+    for (; g < e; g++) {
+        unsigned char bit = (unsigned char) (2U << ((g & 3) * 2));
+        if (!(tzd_hp_map[g / 4] & bit))
+            __atomic_fetch_or(&tzd_hp_map[g / 4], bit, __ATOMIC_RELAXED);
+    }
+}
+
+/* A read of [p, p + n): every granule must have been written.  Heap bytes
+   that were never written hold no value of the program, and would hold
+   another owner's data under an allocator that reuses memory (CWE-908,
+   CWE-457): the read traps.  */
+void tzd_hp_read(const void *p, tzd_size_t n)
+{
+    unsigned long a = (unsigned long) p, x;
+    if (!n || !hp_in(a))
+        return;
+    for (x = a & ~15UL; x < a + n; x += 16) {
+        unsigned b = hp_bits(x);
+        if (!(b & 1) || !(b & 2)) {
+            unsigned long base, size;
+            hp_block(a, &base, &size);
+            tzd_trap_bounds(b & 1
+                            ? "libc2d: read of heap memory that was never written\n"
+                            : "libc2d: use of freed heap memory\n",
+                            p, (void *) base, size, n);
+        }
+    }
+}
+
+/* A managed pointer handed to code that is not checked (the host libc,
+   a system call): whatever it writes there is not seen, so the rest of
+   the object from ADDR on counts as written.  Returns ADDR.  */
+void *tzd_hp_handout(void *addr, const void *base, tzd_size_t size)
+{
+    unsigned long a = (unsigned long) addr, b = (unsigned long) base;
+    if (hp_in(a) && a >= b && a < b + size)
+        tzd_hp_wrote(addr, b + size - a);
+    return addr;
+}
+
+/* N bytes were copied from SRC to DST: a destination granule becomes
+   written when a byte copied into it came from a written granule, or
+   from memory outside the heap.  Bits are only ever set here (a granule
+   keeps the bytes it had besides the copied ones).  */
+void tzd_hp_copy(void *dst, const void *src, tzd_size_t n)
+{
+    unsigned long d = (unsigned long) dst, s = (unsigned long) src, x;
+    if (!n || !hp_in(d))
+        return;
+    if (!hp_in(s)) {
+        tzd_hp_wrote(dst, n);
+        return;
+    }
+    for (x = d & ~15UL; x < d + n; x += 16) {
+        unsigned long lo = x < d ? d : x;
+        unsigned long hi = x + 16 < d + n ? x + 16 : d + n;
+        unsigned long s0 = lo - d + s, s1 = hi - d + s - 1;
+        if ((hp_bits(s0) & 2) || (hp_bits(s1) & 2))
+            tzd_hp_wrote((void *) lo, hi - lo);
+    }
+}
+
+/* Whether P lies in a live heap block (1), a dead one (0), or outside the
+   heap (-1).  */
+int tzd_hp_live(const void *p)
+{
+    unsigned long a = (unsigned long) p;
+    if (!hp_in(a))
+        return -1;
+    return hp_bits(a) & 1;
+}
+
+static void sl_init(struct sl_arena *a, unsigned long size, int c)
 {
     /* A whole number of slots per run: 4096 for the powers of two,
        3 * 4096 for the sizes with a factor 3.  */
@@ -116,9 +283,9 @@ static void sl_init(struct sl_arena *a, unsigned long size)
     a->live = (unsigned long *) tzd_sys_mmap_noreserve(SL_ARENA / size / 8);
     a->cnt = (unsigned short *)
         tzd_sys_mmap_noreserve(SL_ARENA / a->run_bytes * sizeof *a->cnt);
-    a->start = (unsigned long)
-        tzd_sys_mmap_at(0, SL_ARENA, 0 /* PROT_NONE */, 0x4000);
-    if (!a->live || !a->cnt || !a->start)
+    hp_init();
+    a->start = tzd_hp_lo + HP_CLASSES + (unsigned long) c * SL_ARENA;
+    if (!a->live || !a->cnt)
         tzd_trap("libc2d: out of address space for a malloc arena\n");
 }
 
@@ -164,7 +331,7 @@ static void *sl_alloc(int c)
     struct sl_arena *a = &sl_arena[c];
     unsigned long size = sl_size[c], i, off, run;
     if (!a->start)
-        sl_init(a, size);
+        sl_init(a, size, c);
     i = a->bump;
     off = i * size;
     if (off + size > SL_ARENA)
@@ -201,6 +368,7 @@ static int sl_free(unsigned long base)
                          "(freed already, or not from malloc)\n",
                          (void *) base, (void *) base, size);
         a->live[i / 64] &= ~(1UL << (i % 64));
+        hp_fill(base, size, 0, 0);          /* dead from here on */
         tzd_sh_wipe((void *) base, size);   /* the whole slot */
         run = off / a->run_bytes;
         if (--a->cnt[run] == 0 && (run + 1) * a->run_slots <= a->bump)
@@ -222,9 +390,8 @@ static void *big_alloc(tzd_size_t len)
 {
     void *m;
     if (!big_start) {
-        big_start = (unsigned long) tzd_sys_mmap_at(0, BIG_ARENA, 0, 0x4000);
-        if (!big_start)
-            tzd_trap("libc2d: out of address space for the large-block arena\n");
+        hp_init();
+        big_start = tzd_hp_lo + HP_BIG;
     }
     if (len > BIG_ARENA - big_next - PAGE)
         return 0;
@@ -279,6 +446,7 @@ tzd_ptr tzd_malloc(tzd_size_t n)
         al_leave();
         if (!m)
             return tzd_ptr_null();
+        hp_fill((unsigned long) m, n, 1, 1);    /* live, not written */
         return tzd_ptr_make(m, n);    /* bounds are exactly what was asked */
     }
     al_enter();
@@ -288,6 +456,7 @@ tzd_ptr tzd_malloc(tzd_size_t n)
     al_leave();
     if (!m)
         return tzd_ptr_null();
+    hp_fill((unsigned long) m, n, 1, 1);
     return tzd_ptr_make(m, n);        /* bounds are exactly what was asked */
 }
 
@@ -295,7 +464,14 @@ tzd_ptr tzd_calloc(tzd_size_t n, tzd_size_t sz)
 {
     if (sz && n > ((tzd_size_t) -1) / sz)
         tzd_trap("libc2d: calloc size overflow\n");
-    return tzd_malloc(n * sz);        /* fresh mappings are zero-filled */
+    {
+        /* Fresh mappings are zero-filled, and calloc's zeros are the
+           program's values: the block counts as written.  */
+        tzd_ptr q = tzd_malloc(n * sz);
+        if (q.base)
+            tzd_hp_wrote(q.base, n * sz);
+        return q;
+    }
 }
 
 /* With the host libc (tzd --host, task #24), memory allocated inside the
@@ -342,6 +518,7 @@ void tzd_free(tzd_ptr p)
                      p.addr, p.base, p.size);
     /* The bytes are destroyed like any released memory (the mapping is
        then replaced, which also drops them; the wipe is the rule).  */
+    hp_fill((unsigned long) p.base, p.size, 0, 0);     /* dead from here on */
     tzd_sh_wipe(p.base, p.size);      /* overwrite, drop the bounds */
     big_free(p.base, round_up(p.size));
     al_leave();
@@ -370,6 +547,7 @@ tzd_ptr tzd_aligned_alloc(tzd_size_t alignment, tzd_size_t n)
     al_leave();
     if (!m)
         return tzd_ptr_null();
+    hp_fill((unsigned long) m, n, 1, 1);
     return tzd_ptr_make(m, n);
 }
 

@@ -212,11 +212,16 @@ void tzd_ptr_check(tzd_ptr p, tzd_size_t n)
     if (!tzd_ptr_valid(p, n))
         tzd_trap_bounds("libc2d: out-of-bounds access\n", p.addr, p.base,
                         p.size, n);
+    /* In bounds, but the heap block may be gone (task #8).  */
+    if (n && tzd_hp_live(p.base) == 0)
+        tzd_trap_bounds("libc2d: use of freed heap memory\n", p.addr, p.base,
+                        p.size, n);
 }
 
 unsigned char tzd_ptr_load8(tzd_ptr p)
 {
     tzd_ptr_check(p, 1);
+    tzd_hp_read(p.addr, 1);
     return (unsigned char) *p.addr;
 }
 
@@ -224,10 +229,20 @@ void tzd_ptr_store8(tzd_ptr p, unsigned char v)
 {
     tzd_ptr_check(p, 1);
     *p.addr = (char) v;
+    tzd_hp_wrote(p.addr, 1);
 }
 
 void *tzd_ptr_pointer(tzd_ptr p, tzd_size_t n)
 {
     tzd_ptr_check(p, n);
+    if (p.addr)
+        tzd_hp_handout(p.addr, p.base, p.size);
+    return p.addr;
+}
+
+void *tzd_ptr_pointer_out(tzd_ptr p, tzd_size_t n)
+{
+    tzd_ptr_check(p, n);
+    tzd_hp_read(p.addr, n);
     return p.addr;
 }

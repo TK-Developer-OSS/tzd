@@ -891,6 +891,9 @@ null_const_p (const ex &e)
 }
 
 static tree trap_call (location_t loc, const char *what);
+static tree mem_lvalue_addr (tree l, location_t loc);
+static tree hp_access (tree addr, tree n, bool load, location_t loc);
+static tree hp_store_mark (tree l, tree type, location_t loc);
 
 static tree
 libd_decl (const char *name, tree type)
@@ -2313,6 +2316,23 @@ rvalue (ex e, location_t loc)
       /* A raw pointer from the host side: only through a bounds rule.  */
       return host_raw_to_managed (e, loc);
     }
+  if (e.t && e.lv
+      && (INTEGRAL_TYPE_P (e.type) || SCALAR_FLOAT_TYPE_P (e.type)
+	  || TREE_CODE (e.type) == COMPLEX_TYPE
+	  || TREE_CODE (e.type) == VECTOR_TYPE))
+    /* A scalar read from memory reached through a pointer: heap bytes
+       must have been written (task #8, CWE-908).  The value is read
+       first, so the access's own checks (bounds, live block) come first.
+       Aggregates are not tested here: copying a struct is not reading
+       its padding (the copy carries the written bits instead).  */
+    if (tree addr = mem_lvalue_addr (e.t, loc))
+      if (tree chk = hp_access (addr, TYPE_SIZE_UNIT (e.type), true, loc))
+	{
+	  tree v = save_expr (e.t);
+	  e.t = build2 (COMPOUND_EXPR, TREE_TYPE (v),
+			build2 (COMPOUND_EXPR, void_type_node,
+				fold_convert (void_type_node, v), chk), v);
+	}
   e.lv = false;
   e.oa = e.ob = e.os = NULL_TREE;
   return e;
@@ -2661,6 +2681,225 @@ build_check_mpx (tree a, tree b, tree s, tree n, tree isnull, location_t loc)
 		 chk);
 }
 
+/* The heap map (task #8, TK 2026-11-28; libc2d stdlib.c).  The heap is one
+   region [tzd_hp_lo, tzd_hp_lo + tzd_hp_span), and tzd_hp_map has 2 bits
+   per 16-byte granule of it: bit 0, the granule belongs to a live block;
+   bit 1, it was written.  An access through a pointer whose base lies in
+   the region tests bit 0 (use after free, CWE-416: build_check); a scalar
+   read tests bit 1 (a read of heap bytes never written, CWE-908: rvalue);
+   a store sets it (through tzd_hp_wrote, only when it is not set yet).
+   Outside the heap (stack, static, host memory) the range test fails and
+   nothing else is done.  Not in the kernel: kc2d has its own allocator.  */
+static GTY(()) tree hp_lo_decl;
+static GTY(()) tree hp_span_decl;
+static GTY(()) tree hp_map_decl;
+static GTY(()) tree hp_wrote_decl;
+static GTY(()) tree hp_read_decl;
+static GTY(()) tree hp_handout_decl;
+static GTY(()) tree copy_bytes_decl;
+
+static bool
+heap_map_p (void)
+{
+  return !flag_tzd_kernel;
+}
+
+static void
+init_hp_decls (void)
+{
+  if (hp_lo_decl)
+    return;
+  auto var = [] (const char *name, tree type)
+    {
+      tree d = build_decl (BUILTINS_LOCATION, VAR_DECL, get_identifier (name),
+			   type);
+      TREE_PUBLIC (d) = 1;
+      DECL_EXTERNAL (d) = 1;
+      DECL_ARTIFICIAL (d) = 1;
+      return d;
+    };
+  hp_lo_decl = var ("tzd_hp_lo", long_unsigned_type_node);
+  hp_span_decl = var ("tzd_hp_span", long_unsigned_type_node);
+  hp_map_decl = var ("tzd_hp_map", build_pointer_type (unsigned_char_type_node));
+  tree rn = build_function_type_list (void_type_node, const_ptr_type_node,
+				      size_type_node, NULL_TREE);
+  hp_wrote_decl = libd_decl ("tzd_hp_wrote", rn);
+  hp_read_decl = libd_decl ("tzd_hp_read", rn);
+  hp_handout_decl = libd_decl ("tzd_hp_handout",
+			       build_function_type_list (ptr_type_node,
+							 ptr_type_node,
+							 const_ptr_type_node,
+							 size_type_node,
+							 NULL_TREE));
+  copy_bytes_decl = libd_decl ("tzd_copy_bytes",
+			       build_function_type_list (void_type_node,
+							 ptr_type_node,
+							 const_ptr_type_node,
+							 size_type_node,
+							 NULL_TREE));
+}
+
+/* (size_t) ADDR - tzd_hp_lo: the offset of ADDR in the heap region.  */
+static tree
+hp_off (tree addr)
+{
+  init_hp_decls ();
+  return save_expr (fold_build2 (MINUS_EXPR, size_type_node,
+				 fold_convert (size_type_node, addr),
+				 fold_convert (size_type_node, hp_lo_decl)));
+}
+
+/* Whether offset OFF lies in the heap region.  */
+static tree
+hp_in (tree off)
+{
+  return fold_build2 (LT_EXPR, integer_type_node, off,
+		      fold_convert (size_type_node, hp_span_decl));
+}
+
+/* Bit K (0: live, 1: written) of the granule at offset OFF, as 0 or 1.
+   Read only when hp_in (OFF) holds.  */
+static tree
+hp_bit (tree off, int k)
+{
+  tree idx = fold_build2 (RSHIFT_EXPR, size_type_node, off, size_int (6));
+  tree byte = build1 (INDIRECT_REF, unsigned_char_type_node,
+		      fold_build_pointer_plus (hp_map_decl, idx));
+  tree sh = fold_build2 (BIT_AND_EXPR, size_type_node,
+			 fold_build2 (RSHIFT_EXPR, size_type_node, off,
+				      size_int (3)),
+			 size_int (6));
+  if (k)
+    sh = fold_build2 (PLUS_EXPR, size_type_node, sh, size_int (1));
+  tree v = fold_build2 (RSHIFT_EXPR, unsigned_type_node,
+			fold_convert (unsigned_type_node, byte),
+			fold_convert (unsigned_type_node, sh));
+  return fold_build2 (BIT_AND_EXPR, unsigned_type_node, v,
+		      build_one_cst (unsigned_type_node));
+}
+
+/* The N bytes at native address ADDR are read (LOAD) or written: a call of
+   tzd_hp_read / tzd_hp_wrote when ADDR is heap memory and its granule's
+   written bit is clear, or the access runs into the next granule.  The
+   common case -- not heap memory, or a written granule -- costs a compare
+   and a load.  NULL_TREE when there is nothing to do here.  */
+static tree
+hp_access (tree addr, tree n, bool load, location_t loc)
+{
+  if (!heap_map_p () || !current_function_decl || static_init_depth
+      || unevaluated || !n || TREE_CODE (n) != INTEGER_CST || integer_zerop (n))
+    return NULL_TREE;
+  addr = save_expr (addr);
+  tree off = hp_off (addr);
+  tree cross = fold_build2 (GT_EXPR, integer_type_node,
+			    fold_build2 (PLUS_EXPR, size_type_node,
+					 fold_build2 (BIT_AND_EXPR,
+						      size_type_node, off,
+						      size_int (15)),
+					 fold_convert (size_type_node, n)),
+			    size_int (16));
+  tree need = fold_build2 (TRUTH_ANDIF_EXPR, integer_type_node, hp_in (off),
+			   fold_build2 (TRUTH_ORIF_EXPR, integer_type_node,
+					fold_build2 (EQ_EXPR, integer_type_node,
+						     hp_bit (off, 1),
+						     build_zero_cst
+						       (unsigned_type_node)),
+					cross));
+  tree call = build_call_expr_loc (loc, load ? hp_read_decl : hp_wrote_decl, 2,
+				   fold_convert (const_ptr_type_node, addr),
+				   fold_convert (size_type_node, n));
+  return build3 (COND_EXPR, void_type_node, need, call,
+		 build_empty_stmt (loc));
+}
+
+/* The native address of memory lvalue L when it is reached through a
+   pointer (an INDIRECT_REF at its base, under member and element
+   references), rebuilt on the dereferenced pointer value itself: the
+   bounds check that deref () put into the address is left out (it runs
+   with the access).  NULL_TREE for a declared object (it is never heap
+   memory), a bit-field, or anything that would be evaluated twice.  */
+static tree
+mem_lvalue_addr (tree l, location_t loc)
+{
+  auto_vec<tree, 8> chain;
+  tree t = l;
+  while (TREE_CODE (t) == COMPONENT_REF || TREE_CODE (t) == ARRAY_REF)
+    {
+      if (TREE_CODE (t) == COMPONENT_REF
+	  && DECL_BIT_FIELD (TREE_OPERAND (t, 1)))
+	return NULL_TREE;
+      if (TREE_CODE (t) == ARRAY_REF
+	  && TREE_SIDE_EFFECTS (TREE_OPERAND (t, 1)))
+	return NULL_TREE;
+      chain.safe_push (t);
+      t = TREE_OPERAND (t, 0);
+    }
+  if (TREE_CODE (t) != INDIRECT_REF)
+    return NULL_TREE;
+  tree p = TREE_OPERAND (t, 0);
+  tree q = p;
+  for (;;)
+    {
+      STRIP_NOPS (q);
+      if (TREE_CODE (q) != COMPOUND_EXPR)
+	break;
+      q = TREE_OPERAND (q, 1);
+    }
+  if (TREE_CODE (q) == ADDR_EXPR)
+    return NULL_TREE;
+  if (TREE_SIDE_EFFECTS (q) && TREE_CODE (q) != SAVE_EXPR)
+    return NULL_TREE;
+  tree cur = copy_node (t);
+  TREE_OPERAND (cur, 0) = fold_convert (TREE_TYPE (p), q);
+  for (unsigned i = chain.length (); i-- > 0;)
+    {
+      tree c = copy_node (chain[i]);
+      TREE_OPERAND (c, 0) = cur;
+      cur = c;
+    }
+  return build_fold_addr_expr_loc (loc, cur);
+}
+
+/* The mark of a store of TYPE into lvalue L, or NULL_TREE.  */
+static tree
+hp_store_mark (tree l, tree type, location_t loc)
+{
+  if (!heap_map_p () || !current_function_decl || static_init_depth
+      || !TYPE_SIZE_UNIT (type) || TREE_CODE (TYPE_SIZE_UNIT (type)) != INTEGER_CST)
+    return NULL_TREE;
+  tree addr = mem_lvalue_addr (l, loc);
+  return addr ? hp_access (addr, TYPE_SIZE_UNIT (type), false, loc) : NULL_TREE;
+}
+
+static ex convert_to (ex e, tree type, location_t loc, bool explicit_p = false);
+
+/* Managed pointer A passed to a host function as raw pointer type RAW (a
+   call argument, task #8): the host may write the bytes without being
+   seen, so the rest of a heap object from the address on counts as
+   written (tzd_hp_handout).  The record is evaluated before the test: a
+   part of it first computed inside one arm would be unset on the other.
+   Anything else goes through convert_to unchanged.  */
+static ex
+handout_arg (ex a, tree raw, location_t loc)
+{
+  a = rvalue (a, loc);
+  if (bad (a) || !TZD_MPTR_P (a.type) || null_mptr_p (a) || fnptr_p (raw)
+      || !heap_map_p () || !current_function_decl || static_init_depth
+      || unevaluated)
+    return convert_to (a, raw, loc, false);
+  init_hp_decls ();
+  tree v = save_expr (value (a));
+  ex ev = mk (v, a.type);
+  parts (ev);
+  tree pa = fold_convert (ptr_type_node, ev.pa);
+  tree call = build_call_expr_loc (loc, hp_handout_decl, 3, pa,
+				   fold_convert (const_ptr_type_node, ev.pb),
+				   fold_convert (size_type_node, ev.ps));
+  tree r = build3 (COND_EXPR, ptr_type_node, hp_in (hp_off (ev.pb)), call, pa);
+  r = build2 (COMPOUND_EXPR, ptr_type_node, fold_convert (void_type_node, v), r);
+  return mk (fold_convert (raw, r), raw);
+}
+
 static tree
 build_check (tree a, tree b, tree s, tree n, location_t loc)
 {
@@ -2713,14 +2952,49 @@ build_check (tree a, tree b, tree s, tree n, location_t loc)
 			       oob);
   if (integer_zerop (badc))
     return NULL_TREE;
+  /* In bounds, but is the object still there?  A base in the heap region
+     must lie in a live block (task #8, CWE-416).  The base, not the
+     address: it is inside the object for every pointer that passed the
+     bounds test, and it does not change along a loop over the object, so
+     the test is hoisted with the null test.  Bounds first: an address
+     outside them gets the out-of-bounds message.  */
+  tree dead = NULL_TREE;
+  if (heap_map_p ())
+    {
+      tree off = hp_off (b);
+      dead = fold_build2 (TRUTH_ANDIF_EXPR, integer_type_node, hp_in (off),
+			  fold_build2 (EQ_EXPR, integer_type_node,
+				       hp_bit (off, 0),
+				       build_zero_cst (unsigned_type_node)));
+      if (TREE_CODE (n) != INTEGER_CST)
+	/* Nothing is read or written by an empty access.  */
+	dead = fold_build2 (TRUTH_ANDIF_EXPR, integer_type_node,
+			    fold_build2 (NE_EXPR, integer_type_node, n,
+					 build_zero_cst (size_type_node)),
+			    dead);
+    }
+  tree freed = dead ? trap_bounds_call (loc, "use of freed heap memory",
+					a, b, s, n) : NULL_TREE;
   if (flag_tzd_mpx)
-    return build_check_mpx (a, b, s, n, isnull, loc);
+    {
+      tree chk = build_check_mpx (a, b, s, n, isnull, loc);
+      if (dead)
+	chk = build2 (COMPOUND_EXPR, void_type_node, chk,
+		      build3 (COND_EXPR, void_type_node, dead, freed,
+			      build_empty_stmt (loc)));
+      return chk;
+    }
   tree trap = build3 (COND_EXPR, void_type_node, isnull,
 		      trap_bounds_call (loc, "null pointer access", a, b, s, n),
 		      trap_bounds_call (loc, "out-of-bounds pointer access",
 					a, b, s, n));
-  return build3 (COND_EXPR, void_type_node, badc, trap,
-		 build_empty_stmt (loc));
+  tree chk = build3 (COND_EXPR, void_type_node, badc, trap,
+		     build_empty_stmt (loc));
+  if (dead)
+    chk = build2 (COMPOUND_EXPR, void_type_node, chk,
+		  build3 (COND_EXPR, void_type_node, dead, freed,
+			  build_empty_stmt (loc)));
+  return chk;
 }
 
 /* The member ID of struct/union ST, also inside anonymous members, with
@@ -3162,7 +3436,7 @@ static tree libd_redirect (tree fndecl);
 /* Convert E to TYPE.  EXPLICIT_P for casts.  RAW_P when the target is a
    native pointer parameter of a GCC builtin.  */
 static ex
-convert_to (ex e, tree type, location_t loc, bool explicit_p = false)
+convert_to (ex e, tree type, location_t loc, bool explicit_p)
 {
   if (error_p (type))
     return err ();
@@ -3246,6 +3520,26 @@ convert_to (ex e, tree type, location_t loc, bool explicit_p = false)
 	    }
 	  if (!explicit_p)
 	    warning_at (loc, 0, "making pointer from integer without a cast");
+	  /* An integer made an object pointer is a real address: only kernel
+	     mode may use one (task #79, spec 7).  Outside it, two forms stay:
+	     an all-ones sentinel (MAP_FAILED, (char *) -1 of sbrk), and an
+	     integer carried in a void pointer (thread and callback
+	     arguments), which reaches no bytes either (an access through it,
+	     after any cast, still traps).  Unevaluated operands (sizeof,
+	     typeof: the kernel's __is_constexpr) make no address.  */
+	  if (!flag_tzd_kernel && !unevaluated)
+	    {
+	      tree c = e.t;
+	      STRIP_NOPS (c);
+	      if (!VOID_TYPE_P (TZD_MPTR_TARGET (type))
+		  && !(TREE_CODE (c) == INTEGER_CST && integer_all_onesp (c)))
+		{
+		  error_at (loc, "an integer converted to %qT is a real "
+			    "address; only kernel mode (%<-ftzd-kernel%>) "
+			    "uses real addresses", type);
+		  return err ();
+		}
+	    }
 	  /* No allocation behind it: any access traps (kernel mode: the
 	     bounds of its memory region).  */
 	  return from_native (e.t, type, loc);
@@ -3704,10 +3998,22 @@ static tree
 truth (ex e, location_t loc, bool negate = false)
 {
   if (!bad (e) && slot_lv_p (e))
-    /* if (p->f): a null test of the slot's address only.  */
-    return fold_build2_loc (loc, negate ? EQ_EXPR : NE_EXPR,
-			    integer_type_node, slot_raw_addr (e.t, loc),
-			    null_pointer_node);
+    {
+      /* if (p->f): a null test of the slot's address only.  A heap slot
+	 must have been written, like any read (task #8).  */
+      tree c = fold_build2_loc (loc, negate ? EQ_EXPR : NE_EXPR,
+				integer_type_node, slot_raw_addr (e.t, loc),
+				null_pointer_node);
+      if (tree addr = mem_lvalue_addr (e.t, loc))
+	if (tree chk = hp_access (addr, size_int (8), true, loc))
+	  {
+	    c = save_expr (c);
+	    c = build2 (COMPOUND_EXPR, integer_type_node,
+			build2 (COMPOUND_EXPR, void_type_node,
+				fold_convert (void_type_node, c), chk), c);
+	  }
+      return c;
+    }
   e = rvalue (e, loc);
   if (bad (e))
     return error_mark_node;
@@ -3956,10 +4262,308 @@ struct fn_ctx {
   /* A static initializer holds &&label of this function (cfun's
      has_forced_label_in_static: never inlined or cloned away).  */
   bool label_in_static;
+  /* A library function (declared in a system header: libc2d's Managed C
+     parts): it writes with its caller's permission, so its own stores
+     are not checked against write groups; its callers' pointer arguments
+     are (task #79).  */
+  bool delegate;
 };
 
 static fn_ctx *cur_fn;
 static tree *cur_stmts;
+
+/* ------------------------------------------------------------------ */
+/* Write groups (task #79, spec 5/6; user space first).
+
+   `// @tzd group=G writer=F1,F2` on a variable with static storage puts
+   it in section tzd_grp and lists it in section tzd_grpd (libc2d
+   group.c).  A store whose address may lie in tzd_grp -- through a
+   pointer, or into an extern variable -- tests the address against the
+   section (two link-time constants) and, inside, calls tzd_grp_store
+   with the name of the writing function.  A store that names a grouped
+   variable of this unit is decided here: a function not listed is a
+   compile error.  A pointer argument that a library function may write
+   through (a non-const pointer parameter) is tested at the call with the
+   caller's name: the library writes with its caller's permission.  */
+
+static GTY(()) tree grp_start_decl;
+static GTY(()) tree grp_stop_decl;
+static GTY(()) tree grp_store_decl;
+static GTY(()) vec<tree, va_gc> *grp_vars;
+
+static void
+init_grp_decls (void)
+{
+  if (grp_store_decl)
+    return;
+  auto sym = [] (const char *name)
+    {
+      tree d = build_decl (BUILTINS_LOCATION, VAR_DECL, get_identifier (name),
+			   build_array_type (char_type_node, NULL_TREE));
+      TREE_PUBLIC (d) = 1;
+      DECL_EXTERNAL (d) = 1;
+      DECL_ARTIFICIAL (d) = 1;
+      TREE_ADDRESSABLE (d) = 1;
+      return d;
+    };
+  grp_start_decl = sym ("__start_tzd_grp");
+  grp_stop_decl = sym ("__stop_tzd_grp");
+  grp_store_decl = libd_decl ("tzd_grp_store",
+			      build_function_type_list (void_type_node,
+							const_ptr_type_node,
+							const_ptr_type_node,
+							NULL_TREE));
+}
+
+/* Are stores in the current function checked against write groups?  */
+static bool
+grp_active_p (void)
+{
+  return !flag_tzd_kernel && current_function_decl && cur_fn
+	 && !cur_fn->delegate && !static_init_depth && !unevaluated;
+}
+
+/* The group of variable DECL: a TREE_LIST (group name, writers) of
+   STRING_CSTs, or NULL_TREE.  */
+static tree
+grp_of (tree decl)
+{
+  if (!VAR_P (decl))
+    return NULL_TREE;
+  tree a = lookup_attribute ("tzd group", DECL_ATTRIBUTES (decl));
+  return a ? TREE_VALUE (a) : NULL_TREE;
+}
+
+/* Is function FN one of the writers of group G?  */
+static bool
+grp_writer_p (tree g, tree fn)
+{
+  if (!fn || !DECL_NAME (fn) || !TREE_VALUE (g))
+    return false;
+  const char *name = IDENTIFIER_POINTER (DECL_NAME (fn));
+  size_t len = strlen (name);
+  const char *s = TREE_STRING_POINTER (TREE_VALUE (g));
+  while (*s)
+    {
+      const char *e = strchr (s, ',');
+      size_t n = e ? (size_t) (e - s) : strlen (s);
+      if (n == len && memcmp (s, name, n) == 0)
+	return true;
+      if (!e)
+	break;
+      s = e + 1;
+    }
+  return false;
+}
+
+/* The test of a store at native address ADDR by the current function.  */
+static tree
+grp_guard_addr (tree addr, location_t loc)
+{
+  init_grp_decls ();
+  tree a = save_expr (fold_convert (size_type_node, addr));
+  tree lo = fold_convert (size_type_node,
+			  build_fold_addr_expr_loc (loc, grp_start_decl));
+  tree hi = fold_convert (size_type_node,
+			  build_fold_addr_expr_loc (loc, grp_stop_decl));
+  tree in = fold_build2 (LT_EXPR, integer_type_node,
+			 fold_build2 (MINUS_EXPR, size_type_node, a, lo),
+			 fold_build2 (MINUS_EXPR, size_type_node, hi, lo));
+  const char *fn = IDENTIFIER_POINTER (DECL_NAME (current_function_decl));
+  tree call = build_call_expr_loc (loc, grp_store_decl, 2,
+				   fold_convert (const_ptr_type_node, a),
+				   build_string_literal (strlen (fn) + 1, fn));
+  return build3 (COND_EXPR, void_type_node, in, call, build_empty_stmt (loc));
+}
+
+/* The write-group test of a store into lvalue *LP, or NULL_TREE; *LP may
+   be stabilized (its pointer evaluated once, by the test).  A store that
+   names a grouped variable of this unit by a function not among its
+   writers is a compile error here.  */
+static tree
+grp_store_guard (tree *lp, location_t loc)
+{
+  if (!grp_active_p ())
+    return NULL_TREE;
+  tree l = *lp;
+  tree b = l;
+  while (handled_component_p (b))
+    b = TREE_OPERAND (b, 0);
+  if (DECL_P (b))
+    {
+      if (!VAR_P (b))
+	return NULL_TREE;
+      if (tree g = grp_of (b))
+	{
+	  if (!grp_writer_p (g, current_function_decl))
+	    error_at (loc, "%qD writes %qD of group %qs, but is not one of "
+		      "its writers (task #79)", current_function_decl, b,
+		      TREE_STRING_POINTER (TREE_PURPOSE (g)));
+	  return NULL_TREE;
+	}
+      if (!DECL_EXTERNAL (b))
+	return NULL_TREE;   /* defined here without a group */
+      TREE_ADDRESSABLE (b) = 1;
+      return grp_guard_addr (build_fold_addr_expr_loc (loc, b), loc);
+    }
+  if (TREE_CODE (b) != INDIRECT_REF && TREE_CODE (b) != MEM_REF)
+    return NULL_TREE;
+  tree addr = mem_lvalue_addr (l, loc);
+  if (!addr)
+    {
+      /* A bit-field or an operand with side effects: test the pointer
+	 the lvalue is reached through (its object holds the bytes).  */
+      *lp = l = stabilize_reference (l);
+      tree bb = l;
+      while (handled_component_p (bb))
+	bb = TREE_OPERAND (bb, 0);
+      addr = TREE_OPERAND (bb, 0);
+    }
+  return grp_guard_addr (addr, loc);
+}
+
+/* Prepend GUARD (or nothing) to the value of E.  */
+static ex
+grp_prepend (tree guard, ex e)
+{
+  if (!guard || bad (e))
+    return e;
+  tree v = value (e);
+  tree r = build2 (COMPOUND_EXPR, TREE_TYPE (v), guard, v);
+  TREE_SIDE_EFFECTS (r) = 1;
+  ex out = mk (r, e.type);
+  return out;
+}
+
+/* Apply annotation AN to variable VAR (parse_declaration).  */
+static void
+grp_apply_annot (tzd_annot *an, tree var, location_t loc, bool file_scope)
+{
+  const char *group = NULL, *writers = NULL;
+  for (unsigned i = 0; i < an->n; i++)
+    {
+      if (strcmp (an->key[i], "group") == 0 && an->val[i] && !group)
+	group = an->val[i];
+      else if (strcmp (an->key[i], "writer") == 0 && an->val[i] && !writers)
+	writers = an->val[i];
+      else
+	{
+	  error_at (an->loc, "unknown or repeated key %qs in a %<@tzd%> "
+		    "annotation on a variable (task #79)", an->key[i]);
+	  return;
+	}
+    }
+  if (!group)
+    {
+      error_at (an->loc, "%<writer=%> needs %<group=%> (task #79)");
+      return;
+    }
+  for (const char *q = group; *q; q++)
+    if (!ISALNUM (*q) && *q != '_')
+      {
+	error_at (an->loc, "group name %qs: letters, digits and %<_%> only",
+		  group);
+	return;
+      }
+  if (writers)
+    for (const char *q = writers; *q; q++)
+      if (!ISALNUM (*q) && *q != '_'
+	  && !(*q == ',' && q != writers && q[1] && q[1] != ','))
+	{
+	  error_at (an->loc, "writers %qs: function names separated by "
+		    "%<,%>", writers);
+	  return;
+	}
+  if (!VAR_P (var) || !TREE_STATIC (var) || DECL_EXTERNAL (var)
+      || DECL_THREAD_LOCAL_P (var))
+    {
+      error_at (loc, "%<group=%> applies to the definition of a variable "
+		"with static storage (task #79)");
+      return;
+    }
+  if (TYPE_READONLY (TREE_TYPE (var)))
+    {
+      error_at (loc, "%qD is const: no one writes it, it needs no group",
+		var);
+      return;
+    }
+  if (flag_tzd_kernel)
+    {
+      sorry_at (loc, "write groups in kernel mode (task #79, not yet)");
+      return;
+    }
+  if (flag_tzd_delegate_unit)
+    {
+      error_at (loc, "a %<-ftzd-delegate-unit%> unit cannot declare a write "
+		"group (task #79)");
+      return;
+    }
+  (void) file_scope;
+  tree g = build_tree_list (build_string (strlen (group) + 1, group),
+			    writers ? build_string (strlen (writers) + 1,
+						    writers)
+				    : NULL_TREE);
+  DECL_ATTRIBUTES (var) = tree_cons (get_identifier ("tzd group"), g,
+				     DECL_ATTRIBUTES (var));
+  set_decl_section_name (var, "tzd_grp");
+  /* Kept even if unused here: the descriptor refers to it.  */
+  DECL_PRESERVE_P (var) = 1;
+  TREE_USED (var) = 1;
+  if (DECL_ALIGN (var) < 128)
+    SET_DECL_ALIGN (var, 128);
+  vec_safe_push (grp_vars, var);
+}
+
+/* Section tzd_grpd: {address, "G:F1,F2", size} for each grouped variable
+   of the unit, in the 24-byte record layout (libc2d group.c).  */
+static void
+emit_grp_table (void)
+{
+  unsigned n = vec_safe_length (grp_vars);
+  if (n == 0)
+    return;
+  tree et = tzd_mrec_type (void_type_node);   /* {ptr, ptr, size_t} */
+  tree at = build_array_type (et, build_index_type (size_int (n - 1)));
+  vec<constructor_elt, va_gc> *v = NULL;
+  for (unsigned i = 0; i < n; i++)
+    {
+      tree var = (*grp_vars)[i];
+      tree g = grp_of (var);
+      const char *gn = TREE_STRING_POINTER (TREE_PURPOSE (g));
+      const char *wn = TREE_VALUE (g) ? TREE_STRING_POINTER (TREE_VALUE (g))
+		       : "";
+      char *spec = ACONCAT ((gn, ":", wn, NULL));
+      vec<constructor_elt, va_gc> *e = NULL;
+      CONSTRUCTOR_APPEND_ELT (e, mp_field (et, 0),
+			      fold_convert (TREE_TYPE (mp_field (et, 0)),
+					    build_fold_addr_expr (var)));
+      CONSTRUCTOR_APPEND_ELT (e, mp_field (et, 1),
+			      fold_convert (ptr_type_node,
+					    build_string_literal
+					      (strlen (spec) + 1, spec)));
+      CONSTRUCTOR_APPEND_ELT (e, mp_field (et, 2),
+			      fold_convert (size_type_node,
+					    DECL_SIZE_UNIT (var)));
+      tree c = build_constructor (et, e);
+      TREE_CONSTANT (c) = TREE_STATIC (c) = 1;
+      CONSTRUCTOR_APPEND_ELT (v, size_int (i), c);
+    }
+  tree init = build_constructor (at, v);
+  TREE_CONSTANT (init) = TREE_STATIC (init) = 1;
+  tree d = build_decl (BUILTINS_LOCATION, VAR_DECL,
+		       get_identifier ("__tzd_grpd_tab"), at);
+  TREE_STATIC (d) = 1;
+  TREE_PUBLIC (d) = 0;
+  TREE_READONLY (d) = 1;
+  DECL_ARTIFICIAL (d) = 1;
+  TREE_USED (d) = 1;
+  DECL_PRESERVE_P (d) = 1;
+  SET_DECL_ALIGN (d, 64);
+  DECL_USER_ALIGN (d) = 1;
+  DECL_INITIAL (d) = init;
+  set_decl_section_name (d, "tzd_grpd");
+  rest_of_decl_compilation (d, 1, 0);
+}
 
 static void
 add_stmt_tzd (tree t)
@@ -6217,11 +6821,66 @@ parse_primary (void)
 	    tree nn = save_expr (fold_convert (size_type_node, value (n)));
 	    tree chk = build_check (pa, pb, ps, nn, loc);
 	    init_shadow_decls ();
-	    tree w = build_call_expr_loc (loc, tzd_sh_wipe_decl, 2,
+	    /* In user space a recycling wipe is not the end of an object's
+	       storage: pointers kept to the range are not marked dangling
+	       (libc2d tzd_wipe_range; the kernel's kc2d has tzd_sh_wipe).  */
+	    tree wd = tzd_sh_wipe_decl;
+	    if (!flag_tzd_kernel)
+	      wd = libd_decl ("tzd_wipe_range", TREE_TYPE (tzd_sh_wipe_decl));
+	    tree w = build_call_expr_loc (loc, wd, 2,
 					  fold_convert (ptr_type_node, pa), nn);
 	    if (chk)
 	      w = build2 (COMPOUND_EXPR, void_type_node, chk, w);
 	    return mk (w, void_type_node);
+	  }
+	if (strcmp (t.text, "__tzd_copy") == 0)
+	  {
+	    /* __tzd_copy (d, s, n): memmove of N bytes (libc2d's memcpy and
+	       memmove, task #8).  Both ranges are checked like any access
+	       (bounds, live heap block); then the bytes, the bounds entries
+	       of their pointer slots and the heap map's written bits move
+	       together (libc2d tzd_copy_bytes).  Copying is not reading:
+	       bytes never written stay "never written" at D.  */
+	    next ();
+	    expect ("(");
+	    ex d = parse_assign ();
+	    expect (",");
+	    ex s = parse_assign ();
+	    expect (",");
+	    ex n = parse_assign ();
+	    expect (")");
+	    d = rvalue (d, loc);
+	    s = rvalue (s, loc);
+	    n = rvalue (n, loc);
+	    if (bad (d) || bad (s) || bad (n))
+	      return err ();
+	    if (!TZD_MPTR_P (d.type) || !TZD_MPTR_P (s.type)
+		|| !INTEGRAL_TYPE_P (n.type))
+	      {
+		error_at (loc, "%<__tzd_copy%> takes two managed pointers and "
+			  "a size");
+		return err ();
+	      }
+	    parts (d);
+	    parts (s);
+	    tree da = save_expr (d.pa), db = save_expr (d.pb);
+	    tree ds = save_expr (fold_convert (size_type_node, d.ps));
+	    tree sa = save_expr (s.pa), sb = save_expr (s.pb);
+	    tree ss = save_expr (fold_convert (size_type_node, s.ps));
+	    tree nn = save_expr (fold_convert (size_type_node, value (n)));
+	    init_hp_decls ();
+	    tree r = build_call_expr_loc (loc, copy_bytes_decl, 3,
+					  fold_convert (ptr_type_node, da),
+					  fold_convert (const_ptr_type_node, sa),
+					  nn);
+	    if (tree c = build_check (sa, sb, ss, nn, loc))
+	      r = build2 (COMPOUND_EXPR, void_type_node, c, r);
+	    if (grp_active_p ())
+	      r = build2 (COMPOUND_EXPR, void_type_node,
+			  grp_guard_addr (da, loc), r);
+	    if (tree c = build_check (da, db, ds, nn, loc))
+	      r = build2 (COMPOUND_EXPR, void_type_node, c, r);
+	    return mk (r, void_type_node);
 	  }
 	if (strcmp (t.text, "__builtin_offsetof") == 0)
 	  {
@@ -7210,9 +7869,35 @@ call (ex fn, location_t loc)
 	  ok = false;
 	}
     }
+  /* Write groups (task #79): a library function writes through its
+     non-const pointer parameters with the caller's permission (scanf
+     also through its variadic ones), so the caller's name is tested on
+     them here.  */
+  /* libc2d's entry points are named tzd_* (include/string.h:
+     `memcpy (...) __asm__ ("tzd_memcpy")`); testing at a call only adds
+     checks, so the name is enough to tell.  */
+  auto libd_entry_p = [] (tree d)
+    {
+      tree an = DECL_ASSEMBLER_NAME_SET_P (d) ? DECL_ASSEMBLER_NAME (d)
+		: DECL_NAME (d);
+      if (!an)
+	return false;
+      const char *nm = IDENTIFIER_POINTER (an);
+      if (*nm == '*')
+	nm++;
+      return strncmp (nm, "tzd_", 4) == 0;
+    };
+  bool grp_deleg = grp_active_p () && fndecl
+		   && (builtin || redirected || DECL_IN_SYSTEM_HEADER (fndecl)
+		       || libd_entry_p (fndecl));
+  bool grp_scanf = grp_deleg && DECL_NAME (fndecl)
+		   && strstr (IDENTIFIER_POINTER (DECL_NAME (fndecl)), "scanf");
+  tree grp_pre = NULL_TREE;
   for (unsigned i = 0; i < n; i++)
     {
       ex a = args[i];
+      tree pty_i = pt && TREE_VALUE (pt) != void_type_node
+		   ? TREE_VALUE (pt) : NULL_TREE;
       if (pt && TREE_VALUE (pt) != void_type_node
 	  && raw_data_ptr_p (TREE_VALUE (pt))
 	  && raw_data_ptr_p (TREE_TYPE (TREE_VALUE (pt))))
@@ -7272,6 +7957,8 @@ call (ex fn, location_t loc)
 		   && TYPE_MAIN_VARIANT (rvalue (a, alocs[i]).type)
 		      != TYPE_MAIN_VARIANT (ptype))
 	    a = transparent_union_arg (a, ptype, alocs[i]);
+	  else if (!builtin && TREE_CODE (ptype) == POINTER_TYPE)
+	    a = handout_arg (a, ptype, alocs[i]);
 	  else
 	    a = convert_to (a, ptype, alocs[i]);
 	  pt = TREE_CHAIN (pt);
@@ -7304,15 +7991,38 @@ call (ex fn, location_t loc)
 	  else if (!bad (a) && TYPE_MAIN_VARIANT (a.type) == float_type_node)
 	    a = convert_to (a, double_type_node, alocs[i]);
 	  else if (!bad (a) && native_fn && TZD_MPTR_P (a.type))
-	    /* Host function (printf, execl, ...): raw pointer().  */
-	    a = convert_to (a, build_pointer_type (TZD_MPTR_TARGET (a.type)),
-			    alocs[i]);
+	    /* Host function (printf, execl, sscanf, ...): raw pointer().  */
+	    a = handout_arg (a, build_pointer_type (TZD_MPTR_TARGET (a.type)),
+			     alocs[i]);
 	  else
 	    a = promote (a, alocs[i]);
 	}
       if (bad (a))
 	ok = false;
       argv[i] = value (a);
+      if (grp_deleg && ok && (pty_i || grp_scanf))
+	{
+	  tree at = pty_i ? pty_i : a.type;
+	  bool wr = false;
+	  if (TZD_MPTR_P (at) && TZD_MPTR_P (a.type))
+	    wr = !TYPE_READONLY (TZD_MPTR_TARGET (at));
+	  else if (TREE_CODE (at) == POINTER_TYPE
+		   && TREE_CODE (TREE_TYPE (at)) != FUNCTION_TYPE
+		   && POINTER_TYPE_P (TREE_TYPE (argv[i])))
+	    wr = !TYPE_READONLY (TREE_TYPE (at));
+	  if (wr)
+	    {
+	      argv[i] = save_expr (argv[i]);
+	      tree addr = TZD_MPTR_P (a.type)
+			  ? build3 (COMPONENT_REF,
+				    TREE_TYPE (mp_field (a.type, 0)), argv[i],
+				    mp_field (a.type, 0), NULL_TREE)
+			  : argv[i];
+	      tree g = grp_guard_addr (addr, alocs[i]);
+	      grp_pre = grp_pre ? build2 (COMPOUND_EXPR, void_type_node,
+					  grp_pre, g) : g;
+	    }
+	}
       if (!bad (a) && !builtin && TZD_MPTR_P (a.type) && current_function_decl
 	  && !DECL_P (argv[i]) && !TREE_CONSTANT (argv[i])
 	  && TREE_CODE (argv[i]) != TARGET_EXPR
@@ -7417,6 +8127,11 @@ call (ex fn, location_t loc)
        htons (ETH_P_IP) is a constant usable as a case label.  */
     if (tree f = fold_call_expr (loc, c, false))
       c = f;
+  if (grp_pre)
+    {
+      c = build2 (COMPOUND_EXPR, TREE_TYPE (c), grp_pre, c);
+      TREE_SIDE_EFFECTS (c) = 1;
+    }
   if (sv_res)
     {
       /* [pre,] the call[, post], then its result object (aggregate_copy
@@ -7451,6 +8166,10 @@ call (ex fn, location_t loc)
 }
 
 static ex
+incdec_store (ex e, bool inc, bool post, location_t loc);
+
+/* ++/--: the write-group test (task #79) comes before the store.  */
+static ex
 incdec (ex e, bool inc, bool post, location_t loc)
 {
   if (bad (e))
@@ -7460,6 +8179,13 @@ incdec (ex e, bool inc, bool post, location_t loc)
       error_at (loc, "lvalue required as increment/decrement operand");
       return err ();
     }
+  tree guard = grp_store_guard (&e.t, loc);
+  return grp_prepend (guard, incdec_store (e, inc, post, loc));
+}
+
+static ex
+incdec_store (ex e, bool inc, bool post, location_t loc)
+{
   tree l = stabilize_reference (e.t);
   if (TZD_MPTR_P (e.type))
     {
@@ -7564,6 +8290,13 @@ incdec (ex e, bool inc, bool post, location_t loc)
   tree one = convert (TREE_TYPE (l), integer_one_node);
   tree r = build2 (code, TREE_TYPE (l), l, one);
   TREE_SIDE_EFFECTS (r) = 1;
+  /* The store of ++/-- writes heap bytes (task #8); its read is not
+     tested (the lenient side).  */
+  if (tree mark = hp_store_mark (l, TREE_TYPE (l), loc))
+    {
+      r = build2 (COMPOUND_EXPR, TREE_TYPE (r), mark, r);
+      TREE_SIDE_EFFECTS (r) = 1;
+    }
   return mk (r, TYPE_MAIN_VARIANT (e.type));
 }
 
@@ -8129,6 +8862,8 @@ aggregate_copy (tree l, tree r, location_t loc)
   return build2 (COMPOUND_EXPR, type, both, l);
 }
 
+static ex assign_store (ex lhs, ex rhs, int k, char *opbuf, location_t loc);
+
 static ex
 parse_assign (void)
 {
@@ -8161,6 +8896,15 @@ parse_assign (void)
   if (TYPE_READONLY (lhs.type))
     error_at (loc, "assignment of read-only location");
 
+  /* Write groups (task #79): the test comes before the store.  */
+  tree guard = grp_store_guard (&lhs.t, loc);
+  return grp_prepend (guard, assign_store (lhs, rhs, k, opbuf, loc));
+}
+
+/* The store of parse_assign: LHS OP RHS, OP being ops[K] (in OPBUF).  */
+static ex
+assign_store (ex lhs, ex rhs, int k, char *opbuf, location_t loc)
+{
   tree l = lhs.t;
   ex val;
   if (raw_data_ptr_p (lhs.type) && !native_region_p ()
@@ -8311,8 +9055,16 @@ parse_assign (void)
     }
   if (RECORD_OR_UNION_TYPE_P (type) && has_slots_p (type))
     return mk (aggregate_copy (l, value (val), loc), type);
+  /* Heap bytes stored to are written (task #8).  Marked before the store:
+     should the store's own check trap, the program stops anyway.  */
+  tree mark = hp_store_mark (l, type, loc);
   tree m = build2_loc (loc, MODIFY_EXPR, vtype (type), l, value (val));
   TREE_SIDE_EFFECTS (m) = 1;
+  if (mark)
+    {
+      m = build2 (COMPOUND_EXPR, TREE_TYPE (m), mark, m);
+      TREE_SIDE_EFFECTS (m) = 1;
+    }
   return mk (m, type);
 }
 
@@ -9458,6 +10210,9 @@ parse_function_body (tree fndecl, fparams *fp, location_t loc)
       DECL_LANG_FLAG_1 (fndecl) = 1;
     }
   TREE_STATIC (fndecl) = 1;
+  /* Declared in a system header (libc2d's own functions): a delegate
+     (task #79).  Read before the definition's location replaces it.  */
+  bool delegate = DECL_IN_SYSTEM_HEADER (fndecl) || flag_tzd_delegate_unit;
   DECL_SOURCE_LOCATION (fndecl) = loc;
 
   tree res = build_decl (loc, RESULT_DECL, NULL_TREE, rtype);
@@ -9469,6 +10224,7 @@ parse_function_body (tree fndecl, fparams *fp, location_t loc)
   fn_ctx ctx;
   memset (&ctx, 0, sizeof ctx);
   ctx.decl = fndecl;
+  ctx.delegate = delegate;
   fn_ctx *saved_fn = cur_fn;
   cur_fn = &ctx;
   current_function_decl = fndecl;
@@ -9834,6 +10590,8 @@ parse_declaration (bool file_scope)
 {
   attr_gnu_inline = false;
   check_attr_mode_used ();
+  /* A `// @tzd` annotation right before the declaration (task #79).  */
+  tzd_annot *an = peek ().annot;
   if (is_w ("_Static_assert"))
     {
       parse_static_assert ();
@@ -9947,6 +10705,15 @@ parse_declaration (bool file_scope)
 		 (type, tree_cons (get_identifier ("may_alias"), NULL_TREE,
 				   TYPE_ATTRIBUTES (type)));
 
+      if (an && !an->used && (!first || ds.st == ST_TYPEDEF
+			      || TREE_CODE (type) == FUNCTION_TYPE))
+	{
+	  an->used = true;
+	  error_at (an->loc, first ? "a %<@tzd%> annotation applies to a "
+		    "variable definition here (task #79)"
+		    : "an annotated declaration declares one variable "
+		    "(task #79)");
+	}
       if (ds.st == ST_TYPEDEF)
 	{
 	  tree td = build_decl (d.loc, TYPE_DECL, d.id, type);
@@ -10002,6 +10769,11 @@ parse_declaration (bool file_scope)
 	      DECL_USER_ALIGN (var) = 1;
 	    }
 	  apply_attr_decl (var, pass);
+	  if (an && !an->used)
+	    {
+	      an->used = true;
+	      grp_apply_annot (an, var, d.loc, file_scope);
+	    }
 	  var_slot_align (var);
 	  if (!file_scope && VAR_P (var) && !TREE_STATIC (var)
 	      && !DECL_EXTERNAL (var) && TYPE_SIZE_UNIT (TREE_TYPE (var))
@@ -11115,6 +11887,7 @@ tzd_parse_file (void)
       parse_declaration (true);
     }
 
+  tzd_annot_check_unused ();
   if (seen_error ())
     return;
   for (unsigned i = 0; i < vec_safe_length (file_vars); i++)
@@ -11152,6 +11925,7 @@ tzd_parse_file (void)
 	  rest_of_decl_compilation (d, 1, 0);
 	}
     }
+  emit_grp_table ();
   /* The static pointer registrations are emitted after compilation
      (tzd_emit_shinit_late).  */
 }
