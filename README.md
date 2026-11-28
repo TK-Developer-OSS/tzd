@@ -79,6 +79,32 @@ TzD's other checks all ask whether a pointer may touch the memory (out of bounds
   ```
 - **Open points**: objects of different groups on one slab page, the gap between check and store on SMP, aliases of one physical page, uninstrumented code (assembly, native functions). DMA and read-side leaks are out of scope.
 
+## CVE shapes: nine CVSS 9.8 vulnerabilities
+
+> Status 2026-11-28. Small test programs, one per CVE: each reduces the CVE's faulty statement to a self-contained program of the same kind (the same check missing, the same arithmetic). They do not use the real Linux, OpenSSL or PHP, and the Linux ones run in user space, not in the kernel. The programs are not published.
+
+| # | Software | CVE | Shape of the flaw | GCC -O0 | TzD |
+|---|---|---|---|---|---|
+| 20 | Linux (TIPC) | CVE-2021-43267 | key length taken from the message, record sized by the message | corrupted | **stopped** |
+| 21 | Linux (cfg80211) | CVE-2019-17133 | element length byte copied into a 32-byte field | corrupted | **stopped** |
+| 22 | Linux (ksmbd) | CVE-2022-47939 | connection freed by one request, used by the next | confused | **stopped** (use after free) |
+| 23 | OpenSSL (MDC2) | CVE-2016-6303 | `num + len < BLOCK` wraps around | crash | **stopped** |
+| 24 | OpenSSL (BN_bn2dec) | CVE-2016-2182 | unchecked error keeps a store loop running past its array | corrupted | **stopped** |
+| 25 | OpenSSL (statem) | CVE-2016-6309 | pointer into a buffer kept across a moving realloc | corrupted | **stopped** (use after free) |
+| 26 | PHP-FPM | CVE-2019-11043 | pointer computed before an empty string, inside an arena | corrupted | **not stopped** (gap) |
+| 27 | PHP (wddx) | CVE-2016-5772 | name freed in a handler and again at cleanup | confused | **stopped** (double free) |
+| 28 | PHP (phar) | CVE-2019-9021 | search from offset 1 with the full length reads past the name | leaked | **stopped** |
+
+GCC -O0: plain GCC, no stack protector, no `_FORTIFY_SOURCE`. "Corrupted": other data was rewritten; "confused": two objects ended up sharing memory; "leaked": neighbouring data was read. In every case the corrected program also runs to the end under TzD (no false positive).
+
+- **The gap (26):** PHP-FPM keeps request variables one after another in an arena, one malloc'd block. A pointer into it carries the bounds of the whole block, so a pointer a few bytes before one variable is still in bounds and writes the previous variable. TzD sees one object where the program has many. A way for an allocator to hand out pointers with narrower bounds is needed (open).
+
+Target CVEs (all rated 9.8 by NVD, CVSS v3):
+
+- Linux kernel: [CVE-2021-43267](https://nvd.nist.gov/vuln/detail/CVE-2021-43267) (TIPC MSG_CRYPTO key size not validated), [CVE-2019-17133](https://nvd.nist.gov/vuln/detail/CVE-2019-17133) (cfg80211 wext: long SSID not rejected), [CVE-2022-47939](https://nvd.nist.gov/vuln/detail/CVE-2022-47939) (ksmbd SMB2_TREE_DISCONNECT use after free)
+- OpenSSL: [CVE-2016-6303](https://nvd.nist.gov/vuln/detail/CVE-2016-6303) (MDC2_Update integer overflow), [CVE-2016-2182](https://nvd.nist.gov/vuln/detail/CVE-2016-2182) (BN_bn2dec out-of-bounds write), [CVE-2016-6309](https://nvd.nist.gov/vuln/detail/CVE-2016-6309) (statem use after free after realloc)
+- PHP: [CVE-2019-11043](https://nvd.nist.gov/vuln/detail/CVE-2019-11043) (PHP-FPM env_path_info underflow), [CVE-2016-5772](https://nvd.nist.gov/vuln/detail/CVE-2016-5772) (wddx double free), [CVE-2019-9021](https://nvd.nist.gov/vuln/detail/CVE-2019-9021) (phar heap over-read)
+
 ## Cautions
 
 This is a research environment. Do not treat it as proven safe.
@@ -101,6 +127,7 @@ This is a research environment. Do not treat it as proven safe.
 - **Pointers to ended locals**: a pointer to a local variable that is stored in memory is marked when the local's block ends, and its next load stops the program. Gap: such a pointer kept only in a register or in a local whose address is never taken is not seen.
 - **Real addresses only in kernel mode**: outside `-ftzd-kernel`, converting an integer to an object pointer is a compile error. All-ones sentinels (`MAP_FAILED`), integers carried in a `void *` (thread arguments; any access through one still stops) and `sizeof`/`typeof` operands are allowed.
 - **`// @tzd` annotations and write groups** (user space): see [Who may write](#who-may-write).
+- **CVE shapes**: test programs for nine CVSS 9.8 CVEs in Linux, OpenSSL and PHP; TzD stops eight, one is a gap: see [CVE shapes](#cve-shapes-nine-cvss-98-vulnerabilities).
 - **Tests**: `tests/managed` 193 of 195 pass (the two failures predate these changes); in the Juliet subset run by `tests/juliet/run.sh` no correct ("good") program is stopped, the use-after-free cases (CWE-416) are now all stopped by TzD, and more cases are stopped for CWE-457 (3 to 9), CWE-126 (10 to 14) and CWE-124 (16 to 17).
 
 ### 2026-11-22
