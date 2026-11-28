@@ -81,7 +81,7 @@ TzD's other checks all ask whether a pointer may touch the memory (out of bounds
 
 ## CVE shapes: nine CVSS 9.8 vulnerabilities
 
-> Status 2026-11-28. Small test programs, one per CVE: each reduces the CVE's faulty statement to a self-contained program of the same kind (the same check missing, the same arithmetic). They do not use the real Linux, OpenSSL or PHP, and the Linux ones run in user space, not in the kernel. The programs are not published.
+> Status 2026-11-28. One test case per CVE: each reduces the CVE's faulty statement to a self-contained program of the same kind (the same check missing, the same arithmetic). They do not use the real Linux, OpenSSL or PHP, and the Linux ones run in user space, not in the kernel. The test cases are not published.
 
 | # | Software | CVE | Shape of the flaw | GCC -O0 | TzD |
 |---|---|---|---|---|---|
@@ -95,7 +95,7 @@ TzD's other checks all ask whether a pointer may touch the memory (out of bounds
 | 27 | PHP (wddx) | CVE-2016-5772 | name freed in a handler and again at cleanup | confused | **stopped** (double free) |
 | 28 | PHP (phar) | CVE-2019-9021 | search from offset 1 with the full length reads past the name | leaked | **stopped** |
 
-GCC -O0: plain GCC, no stack protector, no `_FORTIFY_SOURCE`. "Corrupted": other data was rewritten; "confused": two objects ended up sharing memory; "leaked": neighbouring data was read. In every case the corrected program also runs to the end under TzD (no false positive).
+GCC -O0: plain GCC, no stack protector, no `_FORTIFY_SOURCE`. "Corrupted": other data was rewritten; "confused": two objects ended up sharing memory; "leaked": neighbouring data was read. In every test case the corrected program also runs to the end under TzD (no false positive).
 
 - **The gap (26):** PHP-FPM keeps request variables one after another in an arena, one malloc'd block. A pointer into it carries the bounds of the whole block, so a pointer a few bytes before one variable is still in bounds and writes the previous variable. TzD sees one object where the program has many. A way for an allocator to hand out pointers with narrower bounds is needed (open).
 
@@ -127,7 +127,7 @@ This is a research environment. Do not treat it as proven safe.
 - **Pointers to ended locals**: a pointer to a local variable that is stored in memory is marked when the local's block ends, and its next load stops the program. Gap: such a pointer kept only in a register or in a local whose address is never taken is not seen.
 - **Real addresses only in kernel mode**: outside `-ftzd-kernel`, converting an integer to an object pointer is a compile error. All-ones sentinels (`MAP_FAILED`), integers carried in a `void *` (thread arguments; any access through one still stops) and `sizeof`/`typeof` operands are allowed.
 - **`// @tzd` annotations and write groups** (user space): see [Who may write](#who-may-write).
-- **CVE shapes**: test programs for nine CVSS 9.8 CVEs in Linux, OpenSSL and PHP; TzD stops eight, one is a gap: see [CVE shapes](#cve-shapes-nine-cvss-98-vulnerabilities).
+- **CVE shapes**: test cases for nine CVSS 9.8 CVEs in Linux, OpenSSL and PHP; TzD stops eight, one is a gap: see [CVE shapes](#cve-shapes-nine-cvss-98-vulnerabilities).
 - **Tests**: `tests/managed` 193 of 195 pass (the two failures predate these changes); in the Juliet subset run by `tests/juliet/run.sh` no correct ("good") program is stopped, the use-after-free cases (CWE-416) are now all stopped by TzD, and more cases are stopped for CWE-457 (3 to 9), CWE-126 (10 to 14) and CWE-124 (16 to 17).
 
 ### 2026-11-22
